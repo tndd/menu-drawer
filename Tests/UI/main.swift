@@ -107,8 +107,11 @@ func run() throws {
         }
         try require(check != nil, "検証項目を選ぶチェックボックスがありません")
         if attribute(check!, kAXValueAttribute) as? Int != 1 { press(check!) }
-        let checked = waitUntil { attribute(check!, kAXValueAttribute) as? Int == 1 }
-        if !checked { print("checkbox rect", rect(check!), "value", attribute(check!,kAXValueAttribute) ?? "" as CFString); for w in attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? [] { print("window",text(w),rect(w)) } }
+        let checked = waitUntil {
+            check = find(app) { attribute($0,kAXRoleAttribute) as? String == kAXCheckBoxRole && text($0).contains(" · T") }
+            return check.flatMap { attribute($0,kAXValueAttribute) as? Int } == 1
+        }
+        if !checked, let check { print("checkbox rect", rect(check), "value", attribute(check,kAXValueAttribute) ?? "" as CFString); for w in attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? [] { print("window",text(w),rect(w)) } }
         try require(checked, "実クリックでチェックがオンになりません")
         press(start)
     }
