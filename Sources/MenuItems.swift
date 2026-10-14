@@ -8,6 +8,8 @@ struct MenuEntry {
     let frame: CGRect
     let image: NSImage?
     var element: AXUIElement? = nil
+    var selectionKey: String = ""
+    var canStore: Bool = true
 }
 
 enum MenuItems {
@@ -29,8 +31,17 @@ enum MenuItems {
             let owner = application?.bundleIdentifier == "com.apple.TextInputMenuAgent" ? "入力メニュー" : application?.localizedName ?? "アプリ"
             let label = [kAXTitleAttribute, kAXDescriptionAttribute].compactMap { attribute(element, $0) as? String }.first { !$0.isEmpty }
             let name = label.map { $0 == owner || application?.bundleIdentifier == "com.apple.controlcenter" ? $0 : "\(owner) · \($0)" } ?? owner
-            return MenuEntry(id: id, pid: pid, name: name, frame: frame, image: application?.icon, element: element)
+            let identifier = attribute(element, kAXIdentifierAttribute) as? String ?? ""
+            let children = childrenByPID[pid] ?? []
+            let index = children.firstIndex { CFEqual($0, element) } ?? 0
+            let key = (application?.bundleIdentifier ?? application?.bundleURL?.path ?? owner) + "#" + (identifier.isEmpty ? String(index) : identifier)
+            let fixed = ["com.apple.menuextra.clock", "com.apple.menuextra.controlcenter"].contains(identifier)
+            return MenuEntry(id: id, pid: pid, name: name, frame: frame, image: application?.icon, element: element, selectionKey: key, canStore: !fixed)
         }.sorted { $0.frame.minX < $1.frame.minX }
+    }
+
+    static func all(menuY: CGFloat, ownPID: pid_t) -> [MenuEntry] {
+        entries(divider: CGRect(x: -100000, y: menuY - 18.5, width: 200000, height: 37), ownPID: ownPID)
     }
 
     static func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {

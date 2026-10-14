@@ -32,7 +32,11 @@ enum NativeItems {
         source.setLocalEventsFilterDuringSuppressionState(filters, state: .eventSuppressionStateRemoteMouseDrag)
         source.setLocalEventsFilterDuringSuppressionState(filters, state: .eventSuppressionStateSuppressionInterval)
         let cursor = CGEvent(source: nil)?.location
-        defer { if let cursor { CGWarpMouseCursorPosition(cursor) } }
+        let cursorHidden = CGDisplayHideCursor(CGMainDisplayID()) == .success
+        defer {
+            if let cursor { CGWarpMouseCursorPosition(cursor) }
+            if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
+        }
         func event(_ type: CGEventType, _ point: CGPoint, _ windowID: CGWindowID, command: Bool) throws -> CGEvent {
             guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { throw Failure.eventUnavailable }
             event.flags = command ? .maskCommand : []
@@ -54,6 +58,8 @@ enum NativeItems {
         let down = try event(.leftMouseDown, CGPoint(x: 20000, y: 20000), entry.id, command: true)
         let up = try event(.leftMouseUp, CGPoint(x: anchor.rightSide ? target.maxX + 8 : target.minX - 8, y: start.midY), anchor.id, command: false)
         deliver(down)
+        let drag = try event(.leftMouseDragged, up.location, anchor.id, command: true)
+        deliver(drag)
         deliver(up)
         let deadline = Date().addingTimeInterval(0.8)
         while Date() < deadline {
@@ -61,16 +67,21 @@ enum NativeItems {
                anchor.rightSide ? item.minX >= currentTarget.maxX - 1 : item.maxX <= currentTarget.minX + 1 { return }
             Thread.sleep(forTimeInterval: 0.04)
         }
+        NSLog("移動失敗 %@ start=%@ target=%@ current=%@", entry.name, NSStringFromRect(start), NSStringFromRect(target), NSStringFromRect(frame(entry.id) ?? .zero))
         throw Failure.moveFailed
     }
 
-    // 座標が確認できた本物のアイコンを、通常のマウス操作と同じ経路で押す。
+    // 本物のアイコンを押す間はカーソルを隠し、元の位置へ戻してから再表示する。
     static func click(_ entry: MenuEntry) throws {
         guard let frame = frame(entry.id), frame.width > 0,
               window(entry.id)?[kCGWindowIsOnscreen as String] as? Bool == true else { throw Failure.missingItem }
         let point = CGPoint(x: frame.midX, y: frame.midY)
         let cursor = CGEvent(source: nil)?.location
-        defer { if let cursor { CGWarpMouseCursorPosition(cursor) } }
+        let cursorHidden = CGDisplayHideCursor(CGMainDisplayID()) == .success
+        defer {
+            if let cursor { CGWarpMouseCursorPosition(cursor) }
+            if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
+        }
         for type in [CGEventType.leftMouseDown, .leftMouseUp] {
             guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { throw Failure.eventUnavailable }
             event.flags = []

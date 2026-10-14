@@ -47,6 +47,10 @@ final class IconButton: NSButton, NSDraggingSource {
     }
 }
 
+final class SelectionView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 final class DrawerPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { orderOut(nil) }
@@ -69,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var returnTimer: Timer?
     var temporary: (entry: MenuEntry, anchor: NativeItems.Anchor)?
     var fixtureWindow: NSWindow?
+    var selectedKeys = Set(UserDefaults.standard.stringArray(forKey: "SelectedItems") ?? [])
+    var draftKeys: Set<String> = []
+    var selectionList: NSScrollView?
+    var selectionButtons: [NSButton] = []
+    var saveButton: NSButton?
+    var selectionSnapshot: [String] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--fixture") { startFixture(); return }
@@ -79,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defaults.set(0, forKey: "NSStatusItem Preferred Position DrawerToggle")
             defaults.set(1, forKey: "NSStatusItem Preferred Position DrawerDivider")
         }
+        defaults.set(100000, forKey: "NSStatusItem Preferred Position DrawerDivider")
         toggle = NSStatusBar.system.statusItem(withLength: 28)
         toggle.autosaveName = "DrawerToggle"
         toggle.button?.image = NSImage(systemSymbolName: "tray", accessibilityDescription: "収納したアイコン")
@@ -92,8 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         divider.button?.toolTip = "この区切りより左のアイコンを収納します"
         divider.button?.target = self
         divider.button?.action = #selector(showSetup)
-        if defaults.bool(forKey: "Configured"), AXIsProcessTrusted() {
-            storeItems()
+        if !selectedKeys.isEmpty, AXIsProcessTrusted() {
+            draftKeys = selectedKeys
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.storeItems() }
         } else { showSetup() }
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in self?.panel?.orderOut(nil) }) { monitors.append(monitor) }
         if let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
@@ -113,12 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func togglePanel() {
-        if NSApp.currentEvent?.type == .rightMouseUp { showContextMenu(); return }
+        if NSApp.currentEvent?.type == .rightMouseUp { showSetup(); return }
         if panel?.isVisible == true { panel?.orderOut(nil); return }
         guard isStored else { showSetup(); return }
         guard AXIsProcessTrusted() else { restoreItems(); showSetup(); return }
         guard let frame = dividerFrame() else { showError("区切りの位置を取得できませんでした。配置を確認してください。"); return }
-        let entries = MenuItems.entries(divider: frame, ownPID: getpid())
+        let entries = MenuItems.entries(divider: frame, ownPID: getpid()).filter { selectedKeys.contains($0.selectionKey) }
         showPanel(entries: entries)
     }
 
@@ -132,9 +144,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         root.layer?.cornerRadius = 14
         let title = NSTextField(labelWithString: "収納したアイコン")
         title.font = .systemFont(ofSize: 12, weight: .semibold)
-        title.frame = NSRect(x: 16, y: height - 30, width: 180, height: 18)
+        title.frame = NSRect(x: 16, y: height - 30, width: 126, height: 18)
         root.addSubview(title)
-        let restore = NSButton(title: "すべて戻す", target: self, action: #selector(showSetup))
+        let choose = NSButton(title: "選ぶ", target: self, action: #selector(showSetup))
+        choose.bezelStyle = .rounded
+        choose.controlSize = .small
+        choose.setAccessibilityIdentifier("choose-items")
+        choose.attributedTitle = NSAttributedString(string: "選ぶ", attributes: [.foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 11)])
+        choose.frame = NSRect(x: 151, y: height - 33, width: 48, height: 24)
+        root.addSubview(choose)
+        let restore = NSButton(title: "すべて戻す", target: self, action: #selector(restoreAll))
         restore.bezelStyle = .rounded
         restore.controlSize = .small
         restore.setAccessibilityIdentifier("restore-all")
@@ -142,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restore.frame = NSRect(x: 210, y: height - 33, width: 82, height: 24)
         root.addSubview(restore)
         if entries.isEmpty {
-            let label = NSTextField(wrappingLabelWithString: "操作できるアイコンがありません。\n配置設定でアイコンを区切りの左へ移動してください。")
+            let label = NSTextField(wrappingLabelWithString: "操作できるアイコンがありません。\n設定で収納するアイコンを選んでください。")
             label.font = .systemFont(ofSize: 12)
             label.textColor = .secondaryLabelColor
             label.frame = NSRect(x: 16, y: 14, width: 272, height: 58)
@@ -230,6 +249,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.isOperating = false
+                    if !openMenu {
+                        self.selectedKeys.remove(entry.selectionKey)
+                        UserDefaults.standard.set(Array(self.selectedKeys), forKey: "SelectedItems")
+                        if self.selectedKeys.isEmpty { self.restoreItems() }
+                    }
                     if openMenu, opened, let anchor {
                         self.temporary = (entry, anchor)
                         self.returnTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
@@ -243,8 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 DispatchQueue.main.async { [weak self] in
                     self?.isOperating = false
-                    self?.showSetup()
-                    self?.showError("アイコンの移動を確認できなかったため、収納を解除しました。元のメニューバーから操作できます。")
+                    self?.showError("このアイコンを移動できませんでした。ほかの項目の選択は維持しています。設定からこの項目のチェックを外して再試行してください。")
                 }
             }
         }
@@ -260,67 +283,159 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.isOperating = false
                 if case .failure = result, NativeItems.frame(temporary.entry.id) != nil {
-                    self?.showSetup()
+                    self?.showError("このアイコンを収納へ戻せませんでした。設定からこの項目の選択を確認してください。")
                 }
             }
         }
     }
 
+    // チェックされた項目だけを区切りの左へ移す。未選択の項目は右に残す。
     @objc func storeItems() {
-        guard AXIsProcessTrusted() else { showSetup(); return }
-        if !isStored, let dividerWindow = divider.button?.window, let toggleWindow = toggle.button?.window,
-           dividerWindow.frame.midX >= toggleWindow.frame.midX {
-            showError("区切り「│」を、⌘キーを押しながらトレイボタンの左へ移動してください。")
-            return
-        }
+        guard AXIsProcessTrusted(), !isOperating else { showSetup(); return }
+        guard let frame = dividerFrame(), let window = divider.button?.window else { return }
+        let entries = MenuItems.all(menuY: frame.midY, ownPID: getpid())
+        let desired = draftKeys
+        let chosen = entries.filter { desired.contains($0.selectionKey) && $0.canStore }
+        let unchosen = entries.filter { !desired.contains($0.selectionKey) || !$0.canStore }
+        let boundary = NativeItems.Anchor(id: CGWindowID(window.windowNumber), rightSide: false)
         panel?.orderOut(nil)
-        divider.button?.title = ""
-        divider.length = max(10000, NSScreen.screens.map { $0.frame.width }.max() ?? 10000)
-        isStored = true
-        UserDefaults.standard.set(true, forKey: "Configured")
-        setup?.orderOut(nil)
-        timer?.invalidate()
+        isOperating = true
+        saveButton?.isEnabled = false
+        selectionButtons.forEach { $0.isEnabled = false }
+        operations.async { [weak self] in
+            do {
+                // 既存の未選択項目が区切りの左にある場合だけ、右へ戻す。
+                if !chosen.isEmpty, let current = NativeItems.frame(boundary.id) {
+                    for entry in unchosen.reversed() where (NativeItems.frame(entry.id)?.maxX ?? .infinity) <= current.maxX {
+                        try NativeItems.move(entry, to: NativeItems.Anchor(id: boundary.id, rightSide: true))
+                    }
+                }
+                for entry in chosen {
+                    if let item = NativeItems.frame(entry.id), let current = NativeItems.frame(boundary.id), item.minX >= current.maxX {
+                        try NativeItems.move(entry, to: boundary)
+                    }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.selectedKeys = desired
+                    UserDefaults.standard.set(Array(desired), forKey: "SelectedItems")
+                    self.isOperating = false
+                    self.saveButton?.isEnabled = true
+                    self.selectionButtons.forEach { $0.isEnabled = true }
+                    if chosen.isEmpty { self.restoreItems() }
+                    else {
+                        self.divider.button?.title = ""
+                        self.divider.length = 10000
+                        self.isStored = true
+                    }
+                    self.setup?.orderOut(nil)
+                    self.timer?.invalidate()
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isOperating = false
+                    self?.saveButton?.isEnabled = true
+                    self?.refreshSelectionList()
+                    self?.showError("選択したアイコンを移動できませんでした。全項目の収納や解除は行っていません。選択を見直して再試行してください。")
+                }
+            }
+        }
     }
 
     func restoreItems() {
         returnTimer?.invalidate()
         temporary = nil
-        UserDefaults.standard.set(false, forKey: "Configured")
         panel?.orderOut(nil)
         divider.length = 18
         divider.button?.title = "│"
         isStored = false
     }
 
-    @objc func showSetup() {
+    @objc func restoreAll() {
+        guard !isOperating else { return }
+        selectedKeys.removeAll()
+        UserDefaults.standard.set([], forKey: "SelectedItems")
         restoreItems()
+        showSetup()
+    }
+
+    @objc func selectionChanged(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue else { return }
+        let key = raw.hasPrefix("select:") ? String(raw.dropFirst(7)) : raw
+        if sender.state == .on { draftKeys.insert(key) } else { draftKeys.remove(key) }
+    }
+
+    func refreshSelectionList() {
+        guard let frame = dividerFrame(), let scroll = selectionList else { return }
+        let entries = AXIsProcessTrusted() ? MenuItems.all(menuY: frame.midY, ownPID: getpid()) : []
+        let snapshot = entries.map { $0.selectionKey + $0.name }
+        if snapshot == selectionSnapshot && !selectionButtons.isEmpty { return }
+        selectionSnapshot = snapshot
+        selectionButtons = []
+        let content = SelectionView(frame: NSRect(x: 0, y: 0, width: 416, height: CGFloat(max(1, entries.count)) * 38))
+        for (index, entry) in entries.enumerated() {
+            let button = NSButton(checkboxWithTitle: entry.name, target: self, action: #selector(selectionChanged(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(entry.selectionKey)
+            button.setAccessibilityIdentifier("select:" + entry.selectionKey)
+            button.state = draftKeys.contains(entry.selectionKey) ? .on : .off
+            button.isEnabled = entry.canStore
+            button.toolTip = entry.canStore ? "チェックした項目だけを収納します" : "macOSの固定項目はそのまま表示します"
+            button.frame = NSRect(x: 8, y: CGFloat(index) * 38 + 7, width: 400, height: 26)
+            content.addSubview(button)
+            selectionButtons.append(button)
+        }
+        if entries.isEmpty {
+            let label = NSTextField(wrappingLabelWithString: "アクセシビリティを許可すると、選べるアイコンが表示されます。")
+            label.frame = NSRect(x: 8, y: 0, width: 400, height: 38)
+            content.addSubview(label)
+        }
+        scroll.documentView = content
+        content.scroll(.zero)
+        if let index = CommandLine.arguments.firstIndex(of: "--validation-output"), CommandLine.arguments.indices.contains(index + 1), let view = setup?.contentView {
+            writeViewImage(view, to: CommandLine.arguments[index + 1] + ".settings.png")
+        }
+    }
+
+    @objc func showSetup() {
+        guard !isOperating else { return }
+        panel?.orderOut(nil)
+        draftKeys = selectedKeys
+        selectionSnapshot = []
         if setup == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 490, height: 350), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 490, height: 500), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "メニュードロワーの設定"
             window.isReleasedWhenClosed = false
             let content = window.contentView!
-            let title = NSTextField(labelWithString: "右上をすっきり、アイコンは下へ")
+            let title = NSTextField(labelWithString: "しまうアイコンを選ぶ")
             title.font = .systemFont(ofSize: 20, weight: .semibold)
-            title.frame = NSRect(x: 24, y: 292, width: 442, height: 30)
+            title.frame = NSRect(x: 24, y: 447, width: 442, height: 30)
             content.addSubview(title)
-            let explanation = NSTextField(wrappingLabelWithString: "1. アクセシビリティだけを許可してください。\nアイコンの名前を読み取り、選んだメニューを開くために使います。画面収録の許可は不要です。\n\n2. ⌘ を押しながら、収納するアイコンを上部の「│」より左へ移動します。「│」はトレイボタンの左に置きます。\n\n3. 「収納を開始」を押します。次からはトレイボタンで開閉できます。一覧の外へドラッグで取り出せます。「すべて戻す」で収納を解除できます。")
+            let explanation = NSTextField(wrappingLabelWithString: "チェックした項目だけを収納します。\nほかのアイコンは上に残ります。選択は次回の起動にも保存されます。")
             explanation.font = .systemFont(ofSize: 13)
-            explanation.frame = NSRect(x: 24, y: 110, width: 442, height: 174)
+            explanation.frame = NSRect(x: 24, y: 394, width: 442, height: 44)
             content.addSubview(explanation)
+            let scroll = NSScrollView(frame: NSRect(x: 24, y: 108, width: 442, height: 276))
+            scroll.hasVerticalScroller = true
+            scroll.drawsBackground = false
+            content.addSubview(scroll)
+            selectionList = scroll
             let status = NSTextField(labelWithString: "")
             status.frame = NSRect(x: 24, y: 76, width: 442, height: 22)
             status.font = .systemFont(ofSize: 12)
             content.addSubview(status)
             statusLabel = status
-            for (title, action, x, width) in [("権限を設定", #selector(requestPermissions), 24.0, 120.0), ("収納を開始", #selector(storeItems), 170.0, 136.0), ("終了", #selector(quit), 350.0, 100.0)] {
+            for (title, action, x, width) in [("権限を設定", #selector(requestPermissions), 24.0, 120.0), ("選択を保存", #selector(storeItems), 170.0, 136.0), ("終了", #selector(quit), 350.0, 100.0)] {
                 let button = NSButton(title: title, target: self, action: action)
                 button.bezelStyle = .rounded
                 button.frame = NSRect(x: x, y: 25, width: width, height: 32)
                 content.addSubview(button)
+                if title == "選択を保存" { saveButton = button }
             }
             window.center()
             setup = window
         }
+        refreshSelectionList()
+        DispatchQueue.main.async { [weak self] in self?.refreshSelectionList() }
         updatePermissionStatus()
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.updatePermissionStatus() }
@@ -329,6 +444,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updatePermissionStatus() {
+        saveButton?.isEnabled = AXIsProcessTrusted() && !isOperating
+        if AXIsProcessTrusted() && !isOperating { refreshSelectionList() }
         statusLabel?.stringValue = "アクセシビリティ：\(AXIsProcessTrusted() ? "許可済み" : "未許可")　画面収録は使用しません"
     }
     @objc func requestPermissions() {
@@ -336,15 +453,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         }
-    }
-    func showContextMenu() {
-        let menu = NSMenu()
-        for (title, selector) in [("配置・権限の設定…", #selector(showSetup)), ("終了して元に戻す", #selector(quit))] {
-            let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-        }
-        if let button = toggle.button { menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button) }
     }
     func showError(_ text: String) {
         let alert = NSAlert()

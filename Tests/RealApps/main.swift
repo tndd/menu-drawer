@@ -14,7 +14,7 @@ func text(_ element: AXUIElement) -> String {
 }
 func find(_ root: AXUIElement, depth: Int = 0, where predicate: (AXUIElement) -> Bool) -> AXUIElement? {
     if predicate(root) { return root }
-    guard depth < 7 else { return nil }
+    guard depth < 10 else { return nil }
     for child in attribute(root, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
         if let match = find(child, depth: depth + 1, where: predicate) { return match }
     }
@@ -43,10 +43,12 @@ func mouse(_ type: CGEventType, at point: CGPoint) {
 }
 func press(_ element: AXUIElement) {
     let frame = rect(element)
-    let point = CGPoint(x: frame.midX, y: frame.midY)
-    mouse(.leftMouseDown, at: point)
-    Thread.sleep(forTimeInterval: 0.08)
-    mouse(.leftMouseUp, at: point)
+    let checkbox = attribute(element,kAXRoleAttribute) as? String == kAXCheckBoxRole
+    let initial = attribute(element,kAXValueAttribute) as? Int
+    let point = CGPoint(x: checkbox ? frame.minX + 8 : frame.midX, y: frame.midY)
+    func click() { mouse(.leftMouseDown,at:point);Thread.sleep(forTimeInterval:0.08);mouse(.leftMouseUp,at:point);Thread.sleep(forTimeInterval:0.15) }
+    click()
+    if checkbox && attribute(element,kAXValueAttribute) as? Int == initial { click() }
 }
 func statusWindows(_ pid: pid_t) -> [[String: Any]] {
     (CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []).filter { $0[kCGWindowOwnerPID as String] as? pid_t == pid && $0[kCGWindowLayer as String] as? Int == 25 }
@@ -58,25 +60,66 @@ func popupExists(pid: pid_t) -> Bool {
 }
 
 func run() throws {
+    let preferences = UserDefaults(suiteName: "local.codex.MenuDrawer")!
+    let originalSelection = preferences.stringArray(forKey: "SelectedItems") ?? []
+    preferences.set([], forKey: "SelectedItems")
+    preferences.synchronize()
+    defer { preferences.set(originalSelection,forKey:"SelectedItems");preferences.synchronize() }
     let cursor = CGEvent(source: nil)?.location
     defer { if let cursor { CGWarpMouseCursorPosition(cursor) } }
-    let drawer = Process()
-    drawer.executableURL = URL(fileURLWithPath: CommandLine.arguments[1])
-    drawer.arguments = ["--validation-output", CommandLine.arguments[2]]
-    try drawer.run()
+    var drawer = Process()
+    func launch() throws {
+        drawer = Process()
+        drawer.executableURL = URL(fileURLWithPath: CommandLine.arguments[1])
+        drawer.arguments = ["--validation-output", CommandLine.arguments[2]]
+        try drawer.run()
+    }
+    try launch()
     defer { if drawer.isRunning { drawer.terminate(); drawer.waitUntilExit() } }
-    let app = AXUIElementCreateApplication(drawer.processIdentifier)
-    var start: AXUIElement?
-    try require(waitUntil { start = find(app) { text($0) == "収納を開始" }; return start != nil || statusWindows(drawer.processIdentifier).contains { windowRect($0).width > 1000 } }, "起動待ちに失敗しました")
-    if let start { press(start) }
-    try require(waitUntil { statusWindows(drawer.processIdentifier).contains { windowRect($0).width > 1000 } }, "収納できませんでした")
-    let dividerRow = statusWindows(drawer.processIdentifier).first { windowRect($0).width > 1000 }!
-    let entries = MenuItems.entries(divider: windowRect(dividerRow), ownPID: drawer.processIdentifier)
-    try require(!entries.isEmpty, "検証対象の実アイコンがありません")
-    let raw = attribute(app, kAXExtrasMenuBarAttribute)!
-    let bar = unsafeBitCast(raw, to: AXUIElement.self)
-    let toggle = find(bar) { text($0).contains("収納したアイコン") }!
-    for entry in entries {
+    var app = AXUIElementCreateApplication(drawer.processIdentifier)
+    try require(waitUntil { find(app) { text($0) == "選択を保存" } != nil }, "選択設定が開きません")
+    let frame = windowRect(statusWindows(drawer.processIdentifier).first!)
+    let entries = MenuItems.all(menuY: frame.midY, ownPID: drawer.processIdentifier).filter { $0.canStore }
+    try require(!entries.isEmpty, "実アイコンがありません")
+    func toggleButton() -> AXUIElement? {
+        guard let raw = attribute(app,kAXExtrasMenuBarAttribute) else { return nil }
+        return find(unsafeBitCast(raw,to:AXUIElement.self)) { text($0).contains("収納したアイコン") }
+    }
+    func openSettings() throws {
+        if find(app,where: { text($0) == "選択を保存" }) != nil { return }
+        guard let toggle = toggleButton() else { throw NSError(domain:"MenuDrawerUI",code:1) }
+        let frame = rect(toggle)
+        for type in [CGEventType.rightMouseDown,.rightMouseUp] {
+            let e=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:CGPoint(x:frame.midX,y:frame.midY),mouseButton:.right)!
+            e.flags=[];e.post(tap:.cghidEventTap);Thread.sleep(forTimeInterval:0.08)
+        }
+        try require(waitUntil { find(app) { text($0)=="選択を保存" } != nil }, "右クリックで選択画面を開けません")
+    }
+    var previous: MenuEntry?
+    for (index, entry) in entries.enumerated() {
+        try openSettings()
+        if let previous { try require((NativeItems.frame(previous.id)?.maxX ?? 1) < 0, "設定を開いただけで収納が解除されました") }
+        var check: AXUIElement?
+        try require(waitUntil { check=find(app) { attribute($0,kAXIdentifierAttribute) as? String == "select:" + entry.selectionKey }; return check != nil }, "選択できません: \(entry.name)")
+        func update(_ e: AXUIElement) {
+            if attribute(e,kAXRoleAttribute) as? String == kAXCheckBoxRole, attribute(e,kAXValueAttribute) as? Int == 1 { press(e) }
+            for c in attribute(e,kAXChildrenAttribute) as? [AXUIElement] ?? [] { update(c) }
+        }
+        update(app)
+        press(check!)
+        try require(waitUntil { attribute(check!,kAXValueAttribute) as? Int == 1 }, "チェックできません: \(entry.name)")
+        press(find(app) { text($0)=="選択を保存" }!)
+        try require(waitUntil { (NativeItems.frame(entry.id)?.maxX ?? 1)<0 && toggleButton().flatMap { attribute($0,kAXEnabledAttribute) as? Bool } == true }, "選択した項目が収納されません: \(entry.name)")
+        let visible = Set((CGWindowListCopyWindowInfo(.optionOnScreenOnly,kCGNullWindowID) as? [[String:Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        try require(entries.filter { $0.id != entry.id }.allSatisfy { visible.contains($0.id) }, "未選択の実アイコンも隠れました")
+        if index == 0 {
+            drawer.terminate();drawer.waitUntilExit()
+            try launch();app=AXUIElementCreateApplication(drawer.processIdentifier)
+            try require(waitUntil { (NativeItems.frame(entry.id)?.maxX ?? 1)<0 && toggleButton().flatMap { attribute($0,kAXEnabledAttribute) as? Bool } == true }, "再起動後に選択が保持されません")
+            print("再起動後も選択した一項目だけを収納: 成功")
+        }
+        let toggle = toggleButton()!
+
         try require(waitUntil { attribute(toggle, kAXEnabledAttribute) as? Bool == true }, "前の操作が完了しません")
         press(toggle)
         var row: AXUIElement?
@@ -105,7 +148,14 @@ func run() throws {
             return frame.maxX < 0 && attribute(toggle, kAXEnabledAttribute) as? Bool == true
         }, "操作後に収納へ戻りません: \(entry.name)")
         try require(find(app, where: { text($0).contains("メニューの表示を確認できなかった") }) == nil, "表示確認のエラーが残っています")
-        print("実アイコン確認: \(entry.name) — クリックで表示・閉じた後に再収納")
+        previous = entry
+        print("選択した実アイコン確認: \(entry.name) — クリックで表示・閉じた後に再収納")
     }
+    // 検証に使った選択だけを解除し、空の選択で終了する。
+    try openSettings()
+    func clear(_ e: AXUIElement) { if attribute(e,kAXRoleAttribute) as? String == kAXCheckBoxRole, attribute(e,kAXValueAttribute) as? Int == 1 { press(e) }; for c in attribute(e,kAXChildrenAttribute) as? [AXUIElement] ?? [] { clear(c) } }
+    clear(app)
+    press(find(app) { text($0)=="選択を保存" }!)
+    try require(waitUntil { !statusWindows(drawer.processIdentifier).contains { windowRect($0).width>1000 } }, "選択解除で表示に戻りません")
 }
 do { try run() } catch { print(error.localizedDescription); exit(1) }
