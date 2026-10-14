@@ -7,11 +7,13 @@ struct MenuEntry {
     let name: String
     let frame: CGRect
     let image: NSImage?
+    var element: AXUIElement? = nil
 }
 
 enum MenuItems {
     static func entries(divider: CGRect, ownPID: pid_t) -> [MenuEntry] {
         let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        var childrenByPID: [pid_t: [AXUIElement]] = [:]
         return rows.compactMap { row -> MenuEntry? in
             guard row[kCGWindowLayer as String] as? Int == Int(CGWindowLevelForKey(.statusWindow)),
                   let pid = row[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID,
@@ -19,11 +21,15 @@ enum MenuItems {
                   let bounds = row[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds),
                   DrawerGeometry.containsItem(frame, divider: divider) else { return nil }
-            let owner = row[kCGWindowOwnerName as String] as? String ?? "アプリ"
-            let title = row[kCGWindowName as String] as? String ?? ""
-            let name = title.isEmpty || title == owner ? owner : "\(owner) · \(title)"
-            let image = MDImageForWindow(id).map { NSImage(cgImage: $0.takeRetainedValue(), size: frame.size) }
-            return MenuEntry(id: id, pid: pid, name: name, frame: frame, image: image)
+            if childrenByPID[pid] == nil { childrenByPID[pid] = menuBarChildren(pid: pid) }
+            // 画面収録を必要とするウィンドウ名・画像は取得しない。
+            // AX側でも実在を確認し、非表示の古いウィンドウを一覧へ混ぜない。
+            guard let element = matchingElement(in: childrenByPID[pid] ?? [], frame: frame) else { return nil }
+            let application = NSRunningApplication(processIdentifier: pid)
+            let owner = application?.bundleIdentifier == "com.apple.TextInputMenuAgent" ? "入力メニュー" : application?.localizedName ?? "アプリ"
+            let label = [kAXTitleAttribute, kAXDescriptionAttribute].compactMap { attribute(element, $0) as? String }.first { !$0.isEmpty }
+            let name = label.map { $0 == owner || application?.bundleIdentifier == "com.apple.controlcenter" ? $0 : "\(owner) · \($0)" } ?? owner
+            return MenuEntry(id: id, pid: pid, name: name, frame: frame, image: application?.icon, element: element)
         }.sorted { $0.frame.minX < $1.frame.minX }
     }
 
@@ -33,23 +39,30 @@ enum MenuItems {
         return value
     }
 
-    static func press(_ entry: MenuEntry) -> AXError {
-        let application = AXUIElementCreateApplication(entry.pid)
-        AXUIElementSetMessagingTimeout(application, 1.5)
-        guard let raw = attribute(application, kAXExtrasMenuBarAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return .noValue }
+    private static func menuBarChildren(pid: pid_t) -> [AXUIElement] {
+        let application = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        guard let raw = attribute(application, kAXExtrasMenuBarAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return [] }
         let bar = unsafeBitCast(raw, to: AXUIElement.self)
-        let children = attribute(bar, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        return attribute(bar, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    }
+
+    private static func matchingElement(in children: [AXUIElement], frame: CGRect) -> AXUIElement? {
         let matches = children.filter { child in
-            guard let raw = attribute(child, kAXPositionAttribute), CFGetTypeID(raw) == AXValueGetTypeID() else { return false }
+            guard let raw = attribute(child, kAXPositionAttribute), CFGetTypeID(raw) == AXValueGetTypeID(),
+                  let rawSize = attribute(child, kAXSizeAttribute), CFGetTypeID(rawSize) == AXValueGetTypeID() else { return false }
             var position = CGPoint.zero
-            AXValueGetValue(unsafeBitCast(raw, to: AXValue.self), .cgPoint, &position)
-            guard let rawSize = attribute(child, kAXSizeAttribute), CFGetTypeID(rawSize) == AXValueGetTypeID() else { return false }
             var size = CGSize.zero
+            AXValueGetValue(unsafeBitCast(raw, to: AXValue.self), .cgPoint, &position)
             AXValueGetValue(unsafeBitCast(rawSize, to: AXValue.self), .cgSize, &size)
-            return abs(position.x + size.width / 2 - entry.frame.midX) < 3 && abs(position.y + size.height / 2 - entry.frame.midY) < 3
+            return abs(position.x + size.width / 2 - frame.midX) < 3 && abs(position.y + size.height / 2 - frame.midY) < 3
         }
-        // 座標が一致する対象だけを操作し、曖昧な場合に別のアイコンを押さない。
-        guard matches.count == 1, let element = matches.first else { return .invalidUIElement }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    static func press(_ entry: MenuEntry) -> AXError {
+        guard let element = entry.element ?? matchingElement(in: menuBarChildren(pid: entry.pid), frame: entry.frame) else { return .invalidUIElement }
+        AXUIElementSetMessagingTimeout(element, 1.5)
         let before = popupWindows(pid: entry.pid)
         let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
         // NSMenu は選択待ちの間 AXPress を返さない。タイムアウト時は実際の

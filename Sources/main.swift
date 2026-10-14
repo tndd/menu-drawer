@@ -1,17 +1,23 @@
 import Cocoa
 import ApplicationServices
-import ScreenCaptureKit
 
 final class IconButton: NSButton {
     var invoke: (() -> Void)?
     init(entry: MenuEntry) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 48, height: 42))
-        image = entry.image ?? NSImage(systemSymbolName: "questionmark.square.dashed", accessibilityDescription: nil)
+        super.init(frame: NSRect(x: 0, y: 0, width: 272, height: 44))
+        let icon = (entry.image?.copy() as? NSImage) ?? NSImage(systemSymbolName: "app", accessibilityDescription: nil)
+        icon?.size = NSSize(width: 24, height: 24)
+        image = icon
         imageScaling = .scaleProportionallyDown
-        title = ""
+        imagePosition = .imageLeft
+        title = "  " + entry.name
+        alignment = .left
+        font = .systemFont(ofSize: 13)
+        attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 13)])
+        cell?.lineBreakMode = .byTruncatingTail
         bezelStyle = .texturedRounded
         isBordered = false
-        toolTip = entry.image == nil ? "\(entry.name)（画像を取得できませんでした）" : entry.name
+        toolTip = entry.name
         setAccessibilityLabel(entry.name)
         target = self
         action = #selector(activate)
@@ -59,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         divider.button?.toolTip = "この区切りより左のアイコンを収納します"
         divider.button?.target = self
         divider.button?.action = #selector(showSetup)
-        if defaults.bool(forKey: "Configured"), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() {
+        if defaults.bool(forKey: "Configured"), AXIsProcessTrusted() {
             storeItems()
         } else { showSetup() }
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in self?.panel?.orderOut(nil) }) { monitors.append(monitor) }
@@ -83,16 +89,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSApp.currentEvent?.type == .rightMouseUp { showContextMenu(); return }
         if panel?.isVisible == true { panel?.orderOut(nil); return }
         guard isStored else { showSetup(); return }
-        guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { restoreItems(); showSetup(); return }
+        guard AXIsProcessTrusted() else { restoreItems(); showSetup(); return }
         guard let frame = dividerFrame() else { showError("区切りの位置を取得できませんでした。配置を確認してください。"); return }
         let entries = MenuItems.entries(divider: frame, ownPID: getpid())
         showPanel(entries: entries)
     }
 
     func panelContent(entries: [MenuEntry]) -> NSView {
-        let rows = max(1, Int(ceil(Double(entries.count) / 5)))
-        let height: CGFloat = entries.isEmpty ? 112 : CGFloat(min(rows, 8)) * 48 + 48
-        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 276, height: height))
+        let rows = max(1, entries.count)
+        let height: CGFloat = entries.isEmpty ? 112 : CGFloat(min(rows, 8)) * 44 + 48
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 304, height: height))
         root.material = .popover
         root.state = .active
         root.wantsLayer = true
@@ -102,19 +108,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title.frame = NSRect(x: 16, y: height - 30, width: 180, height: 18)
         root.addSubview(title)
         if entries.isEmpty {
-            let label = NSTextField(wrappingLabelWithString: "まだ収納されていません。\n配置設定でアイコンを区切りの左へ移動します。")
+            let label = NSTextField(wrappingLabelWithString: "操作できるアイコンがありません。\n配置設定でアイコンを区切りの左へ移動してください。")
             label.font = .systemFont(ofSize: 12)
             label.textColor = .secondaryLabelColor
-            label.frame = NSRect(x: 16, y: 14, width: 244, height: 58)
+            label.frame = NSRect(x: 16, y: 14, width: 272, height: 58)
             root.addSubview(label)
         } else {
-            let scroll = NSScrollView(frame: NSRect(x: 12, y: 8, width: 252, height: height - 44))
+            let scroll = NSScrollView(frame: NSRect(x: 12, y: 8, width: 280, height: height - 44))
             scroll.drawsBackground = false
             scroll.hasVerticalScroller = rows > 8
-            let content = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: CGFloat(rows) * 48))
+            let content = NSView(frame: NSRect(x: 0, y: 0, width: 272, height: CGFloat(rows) * 44))
             for (index, entry) in entries.enumerated() {
                 let button = IconButton(entry: entry)
-                button.frame.origin = CGPoint(x: CGFloat(index % 5) * 48, y: CGFloat(rows - index / 5 - 1) * 48)
+                button.frame.origin = CGPoint(x: 0, y: CGFloat(rows - index - 1) * 44)
                 button.invoke = { [weak self] in self?.activate(entry) }
                 content.addSubview(button)
             }
@@ -132,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = window.screen ?? NSScreen.main!
         let next = DrawerPanel(contentRect: DrawerGeometry.panel(anchor: anchor, visible: screen.visibleFrame, size: view.frame.size),
                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        next.title = "収納したアイコン"
         next.isOpaque = false
         next.backgroundColor = .clear
         next.hasShadow = true
@@ -143,6 +150,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel = next
         next.orderFrontRegardless()
         next.makeKey()
+        if let index = CommandLine.arguments.firstIndex(of: "--validation-output"), CommandLine.arguments.indices.contains(index + 1) {
+            writeViewImage(view, to: CommandLine.arguments[index + 1])
+        }
     }
 
     func activate(_ entry: MenuEntry) {
@@ -156,7 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func storeItems() {
-        guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { showSetup(); return }
+        guard AXIsProcessTrusted() else { showSetup(); return }
+        if !isStored, let dividerWindow = divider.button?.window, let toggleWindow = toggle.button?.window,
+           dividerWindow.frame.midX >= toggleWindow.frame.midX {
+            showError("区切り「│」を、⌘キーを押しながらトレイボタンの左へ移動してください。")
+            return
+        }
         panel?.orderOut(nil)
         divider.button?.title = ""
         divider.length = max(10000, NSScreen.screens.map { $0.frame.width }.max() ?? 10000)
@@ -184,7 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             title.font = .systemFont(ofSize: 20, weight: .semibold)
             title.frame = NSRect(x: 24, y: 292, width: 442, height: 30)
             content.addSubview(title)
-            let explanation = NSTextField(wrappingLabelWithString: "1. 下のボタンから、このアプリの権限を許可します。\n画面収録：アイコン画像の取得だけに使用します。\nアクセシビリティ：選択したアイコンのメニューを開きます。\n\n2. ⌘ を押しながら、収納するアイコンを上部の「│」より左へ移動します。「│」はトレイボタンの左に置きます。\n\n3. 「収納を開始」を押します。次からはトレイボタンで開閉できます。右クリックでこの設定を開けます。")
+            let explanation = NSTextField(wrappingLabelWithString: "1. アクセシビリティだけを許可してください。\nアイコンの名前を読み取り、選んだメニューを開くために使います。画面収録の許可は不要です。\n\n2. ⌘ を押しながら、収納するアイコンを上部の「│」より左へ移動します。「│」はトレイボタンの左に置きます。\n\n3. 「収納を開始」を押します。次からはトレイボタンで開閉できます。右クリックでこの設定を開けます。")
             explanation.font = .systemFont(ofSize: 13)
             explanation.frame = NSRect(x: 24, y: 110, width: 442, height: 174)
             content.addSubview(explanation)
@@ -210,15 +225,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updatePermissionStatus() {
-        statusLabel?.stringValue = "アクセシビリティ：\(AXIsProcessTrusted() ? "許可済み" : "未許可")　画面収録：\(CGPreflightScreenCaptureAccess() ? "許可済み" : "未許可（許可後は再起動）")"
+        statusLabel?.stringValue = "アクセシビリティ：\(AXIsProcessTrusted() ? "許可済み" : "未許可")　画面収録は使用しません"
     }
     @objc func requestPermissions() {
         if !AXIsProcessTrusted() {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
-        }
-        if !CGPreflightScreenCaptureAccess() {
-            SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { _, _ in }
         }
     }
     func showContextMenu() {
@@ -243,25 +255,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func renderPreview() {
-        let entries = ["wifi", "speaker.wave.2", "battery.100percent", "cloud", "externaldrive", "lock.shield", "bolt", "headphones", "keyboard", "clock", "display", "arrow.triangle.2.circlepath"].enumerated().map { index, symbol in
-            MenuEntry(id: UInt32(index), pid: 0, name: symbol, frame: .zero, image: NSImage(systemSymbolName: symbol, accessibilityDescription: symbol))
+        let entries = [("Safari", "safari"), ("メモ", "note.text"), ("カレンダー", "calendar"), ("ミュージック", "music.note"), ("設定", "gearshape")].enumerated().map { index, item in
+            MenuEntry(id: UInt32(index), pid: 0, name: item.0, frame: .zero, image: NSImage(systemSymbolName: item.1, accessibilityDescription: item.0))
         }
         let view = panelContent(entries: entries)
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         view.appearance = NSAppearance(named: .aqua)
         view.display()
+        if let destination = CommandLine.arguments.last { writeViewImage(view, to: destination) }
+        NSApp.terminate(nil)
+    }
+
+    func writeViewImage(_ view: NSView, to destination: String) {
+        view.display()
         if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
             view.cacheDisplay(in: view.bounds, to: bitmap)
-            if let data = bitmap.representation(using: .png, properties: [:]), let destination = CommandLine.arguments.last {
+            if let data = bitmap.representation(using: .png, properties: [:]) {
                 try? data.write(to: URL(fileURLWithPath: destination))
             }
         }
-        NSApp.terminate(nil)
     }
+
     func startFixture() {
         NSApp.setActivationPolicy(.accessory)
-        UserDefaults.standard.set(1, forKey: "NSStatusItem Preferred Position FixtureIcon")
+        UserDefaults.standard.set(CommandLine.arguments.contains("--fixture-hidden") ? 1 : 10000, forKey: "NSStatusItem Preferred Position FixtureIcon")
         UserDefaults.standard.set(0, forKey: "NSStatusItem Preferred Position FixtureSpacer")
         let item = NSStatusBar.system.statusItem(withLength: 28)
         item.autosaveName = "FixtureIcon"
