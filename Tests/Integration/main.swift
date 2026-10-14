@@ -27,23 +27,31 @@ for entry in entries {
     try require(entry.element != nil, "クリック対象が特定されていません")
     let row = candidates.first { $0[kCGWindowNumber as String] as? CGWindowID == entry.id }!
     try require((row[kCGWindowIsOnscreen as String] as? Bool ?? false) == false && entry.frame.maxX < 0, "検証アイコンは収納されている必要があります")
-    let operation = DispatchGroup()
-    var result: AXError = .failure
-    operation.enter()
-    DispatchQueue.global().async { result = MenuItems.press(entry); operation.leave() }
-    let deadline = Date().addingTimeInterval(4)
+    let dividerID = candidates.first { row in
+        guard let bounds = row[kCGWindowBounds as String] as? NSDictionary, let frame = CGRect(dictionaryRepresentation: bounds) else { return false }
+        return frame.width > 1000
+    }![kCGWindowNumber as String] as! CGWindowID
+    print("検証: 画面外から取り出す")
+    try NativeItems.move(entry, to: NativeItems.Anchor(id: dividerID, rightSide: true))
+    try NativeItems.click(entry)
+    let deadline = Date().addingTimeInterval(3)
     var sawMenu = false
     while Date() < deadline && !sawMenu {
-        let after = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-        sawMenu = after.contains { $0[kCGWindowOwnerPID as String] as? pid_t == process.processIdentifier && $0[kCGWindowLayer as String] as? Int == 101 }
+        sawMenu = NativeItems.visibleWindows(pid: entry.pid).values.contains(101)
         if !sawMenu { Thread.sleep(forTimeInterval: 0.05) }
     }
-    try require(operation.wait(timeout: .now() + 3) == .success, "メニュー操作が完了しませんでした")
-    try require(result == .success, "収納したアイコンのメニュー操作に失敗しました")
-    try require(sawMenu, "元アプリのメニューが実際に表示されていません")
+    try require(sawMenu, "本物のアイコンをクリックしてもメニューが表示されません")
+    CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true)?.postToPid(entry.pid)
+    CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false)?.postToPid(entry.pid)
+    let closeDeadline = Date().addingTimeInterval(2)
+    while NativeItems.visibleWindows(pid: entry.pid).values.contains(101), Date() < closeDeadline { Thread.sleep(forTimeInterval: 0.05) }
+    Thread.sleep(forTimeInterval: 0.3)
+    print("検証: メニューを閉じて再収納する")
+    try NativeItems.move(entry, to: NativeItems.Anchor(id: dividerID, rightSide: false))
+    try require((NativeItems.frame(entry.id)?.maxX ?? 1) < 0, "元の収納位置に戻りませんでした")
 }
 
-print("通常アイコン・名前の取得、収納中の対象特定、元メニューの実表示を確認")
+print("通常アイコン・名前の取得、本物のアイコンの取り出し・クリック・再収納を確認")
 
 }
 do { try run() } catch { print(error.localizedDescription); exit(1) }

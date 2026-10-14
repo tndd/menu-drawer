@@ -60,23 +60,4 @@ enum MenuItems {
         return matches.count == 1 ? matches.first : nil
     }
 
-    static func press(_ entry: MenuEntry) -> AXError {
-        guard let element = entry.element ?? matchingElement(in: menuBarChildren(pid: entry.pid), frame: entry.frame) else { return .invalidUIElement }
-        AXUIElementSetMessagingTimeout(element, 1.5)
-        let before = popupWindows(pid: entry.pid)
-        let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
-        // NSMenu は選択待ちの間 AXPress を返さない。タイムアウト時は実際の
-        // メニューウィンドウが新しく表示された場合だけ成功として扱う。
-        if result == .cannotComplete && !popupWindows(pid: entry.pid).subtracting(before).isEmpty { return .success }
-        return result
-    }
-
-    private static func popupWindows(pid: pid_t) -> Set<CGWindowID> {
-        let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-        return Set(rows.compactMap { row in
-            guard row[kCGWindowOwnerPID as String] as? pid_t == pid,
-                  row[kCGWindowLayer as String] as? Int == Int(CGWindowLevelForKey(.popUpMenuWindow)) else { return nil }
-            return row[kCGWindowNumber as String] as? CGWindowID
-        })
-    }
 }

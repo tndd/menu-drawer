@@ -1,8 +1,10 @@
 import Cocoa
 import ApplicationServices
 
-final class IconButton: NSButton {
+final class IconButton: NSButton, NSDraggingSource {
     var invoke: (() -> Void)?
+    var takeOut: (() -> Void)?
+    private var originPanelFrame: NSRect = .zero
     init(entry: MenuEntry) {
         super.init(frame: NSRect(x: 0, y: 0, width: 272, height: 44))
         let icon = (entry.image?.copy() as? NSImage) ?? NSImage(systemSymbolName: "app", accessibilityDescription: nil)
@@ -24,6 +26,25 @@ final class IconButton: NSButton {
     }
     required init?(coder: NSCoder) { fatalError() }
     @objc func activate() { invoke?() }
+    override func mouseDown(with event: NSEvent) {
+        let origin = event.locationInWindow
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if next.type == .leftMouseUp { performClick(nil); return }
+            if hypot(next.locationInWindow.x - origin.x, next.locationInWindow.y - origin.y) >= 5 {
+                originPanelFrame = window?.frame ?? .zero
+                let pasteboard = NSPasteboardItem()
+                pasteboard.setString(toolTip ?? title, forType: .string)
+                let item = NSDraggingItem(pasteboardWriter: pasteboard)
+                item.setDraggingFrame(NSRect(origin: convert(origin, from: nil), size: NSSize(width: 24, height: 24)), contents: image)
+                beginDraggingSession(with: [item], event: next, source: self).animatesToStartingPositionsOnCancelOrFail = false
+                return
+            }
+        }
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
+    func draggingSession(_ session: NSDraggingSession, endedAt point: NSPoint, operation: NSDragOperation) {
+        if !originPanelFrame.contains(point) { takeOut?() }
+    }
 }
 
 final class DrawerPanel: NSPanel {
@@ -42,6 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var statusLabel: NSTextField?
     var fixtureItems: [NSStatusItem] = []
+    let operations = DispatchQueue(label: "MenuDrawer.NativeItems")
+    var isOperating = false { didSet { toggle?.button?.isEnabled = !isOperating } }
+    var currentEntries: [MenuEntry] = []
+    var returnTimer: Timer?
+    var temporary: (entry: MenuEntry, anchor: NativeItems.Anchor)?
+    var fixtureWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--fixture") { startFixture(); return }
@@ -107,6 +134,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         title.frame = NSRect(x: 16, y: height - 30, width: 180, height: 18)
         root.addSubview(title)
+        let restore = NSButton(title: "すべて戻す", target: self, action: #selector(showSetup))
+        restore.bezelStyle = .rounded
+        restore.controlSize = .small
+        restore.setAccessibilityIdentifier("restore-all")
+        restore.attributedTitle = NSAttributedString(string: "すべて戻す", attributes: [.foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 11)])
+        restore.frame = NSRect(x: 210, y: height - 33, width: 82, height: 24)
+        root.addSubview(restore)
         if entries.isEmpty {
             let label = NSTextField(wrappingLabelWithString: "操作できるアイコンがありません。\n配置設定でアイコンを区切りの左へ移動してください。")
             label.font = .systemFont(ofSize: 12)
@@ -122,6 +156,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let button = IconButton(entry: entry)
                 button.frame.origin = CGPoint(x: 0, y: CGFloat(rows - index - 1) * 44)
                 button.invoke = { [weak self] in self?.activate(entry) }
+                button.takeOut = { [weak self] in self?.takeOut(entry) }
+                button.toolTip = entry.name + " — クリックで開く・一覧の外へドラッグで取り出す"
                 content.addSubview(button)
             }
             scroll.documentView = content
@@ -133,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showPanel(entries: [MenuEntry]) {
         guard let button = toggle.button, let window = button.window else { return }
+        currentEntries = entries
         let view = panelContent(entries: entries)
         let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
         let screen = window.screen ?? NSScreen.main!
@@ -155,12 +192,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func activate(_ entry: MenuEntry) {
+    func returnAnchor(for entry: MenuEntry) -> NativeItems.Anchor? {
+        guard let index = currentEntries.firstIndex(where: { $0.id == entry.id }) else { return nil }
+        let next = currentEntries.dropFirst(index + 1).first?.id ?? divider.button?.window.map { CGWindowID($0.windowNumber) }
+        return next.map { NativeItems.Anchor(id: $0, rightSide: false) }
+    }
+
+    func activate(_ entry: MenuEntry) { expose(entry, openMenu: true) }
+    func takeOut(_ entry: MenuEntry) { expose(entry, openMenu: false) }
+
+    func expose(_ entry: MenuEntry, openMenu: Bool) {
+        guard !isOperating, let toggleWindow = toggle.button?.window else { return }
+        let anchor = returnAnchor(for: entry)
+        let oldTemporary = temporary
+        temporary = nil
+        returnTimer?.invalidate()
         panel?.orderOut(nil)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = MenuItems.press(entry)
-            if result != .success {
-                DispatchQueue.main.async { self?.showError("「\(entry.name)」のメニューを開けませんでした（\(result.rawValue)）。配置設定から元のアイコンを表示して操作できます。") }
+        isOperating = true
+        let destination = NativeItems.Anchor(id: CGWindowID(toggleWindow.windowNumber), rightSide: true)
+        operations.async { [weak self] in
+            do {
+                if let oldTemporary { try NativeItems.move(oldTemporary.entry, to: oldTemporary.anchor) }
+                try NativeItems.move(entry, to: destination)
+                let before = NativeItems.visibleWindows(pid: entry.pid)
+                if openMenu { try NativeItems.click(entry) }
+                var added: [CGWindowID: Int] = [:]
+                if openMenu {
+                    let deadline = Date().addingTimeInterval(1)
+                    repeat {
+                        added = NativeItems.visibleWindows(pid: entry.pid).filter { before[$0.key] == nil }
+                        if !added.isEmpty || NSWorkspace.shared.frontmostApplication?.processIdentifier == entry.pid { break }
+                        Thread.sleep(forTimeInterval: 0.05)
+                    } while Date() < deadline
+                }
+                let menuWindows = Set(added.filter { $0.value > 0 }.keys)
+                let opened = !added.isEmpty || NSWorkspace.shared.frontmostApplication?.processIdentifier == entry.pid
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.isOperating = false
+                    if openMenu, opened, let anchor {
+                        self.temporary = (entry, anchor)
+                        self.returnTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+                            let visible = Set(NativeItems.visibleWindows(pid: entry.pid).keys)
+                            if menuWindows.isDisjoint(with: visible) { self?.putTemporaryBack() }
+                        }
+                    } else if openMenu {
+                        self.showError("「\(entry.name)」はメニューバーへ取り出しました。メニューの表示を確認できなかったため、上の本物のアイコンから操作してください。")
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isOperating = false
+                    self?.showSetup()
+                    self?.showError("アイコンの移動を確認できなかったため、収納を解除しました。元のメニューバーから操作できます。")
+                }
+            }
+        }
+    }
+
+    func putTemporaryBack() {
+        guard !isOperating, let temporary else { return }
+        self.temporary = nil
+        returnTimer?.invalidate()
+        isOperating = true
+        operations.async { [weak self] in
+            let result = Result { try NativeItems.move(temporary.entry, to: temporary.anchor) }
+            DispatchQueue.main.async { [weak self] in
+                self?.isOperating = false
+                if case .failure = result, NativeItems.frame(temporary.entry.id) != nil {
+                    self?.showSetup()
+                }
             }
         }
     }
@@ -182,6 +283,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func restoreItems() {
+        returnTimer?.invalidate()
+        temporary = nil
+        UserDefaults.standard.set(false, forKey: "Configured")
         panel?.orderOut(nil)
         divider.length = 18
         divider.button?.title = "│"
@@ -199,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             title.font = .systemFont(ofSize: 20, weight: .semibold)
             title.frame = NSRect(x: 24, y: 292, width: 442, height: 30)
             content.addSubview(title)
-            let explanation = NSTextField(wrappingLabelWithString: "1. アクセシビリティだけを許可してください。\nアイコンの名前を読み取り、選んだメニューを開くために使います。画面収録の許可は不要です。\n\n2. ⌘ を押しながら、収納するアイコンを上部の「│」より左へ移動します。「│」はトレイボタンの左に置きます。\n\n3. 「収納を開始」を押します。次からはトレイボタンで開閉できます。右クリックでこの設定を開けます。")
+            let explanation = NSTextField(wrappingLabelWithString: "1. アクセシビリティだけを許可してください。\nアイコンの名前を読み取り、選んだメニューを開くために使います。画面収録の許可は不要です。\n\n2. ⌘ を押しながら、収納するアイコンを上部の「│」より左へ移動します。「│」はトレイボタンの左に置きます。\n\n3. 「収納を開始」を押します。次からはトレイボタンで開閉できます。一覧の外へドラッグで取り出せます。「すべて戻す」で収納を解除できます。")
             explanation.font = .systemFont(ofSize: 13)
             explanation.frame = NSRect(x: 24, y: 110, width: 442, height: 174)
             content.addSubview(explanation)
@@ -250,6 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
+        operations.sync { } // ドラッグのマウスアップを送り終えてから終了する。
         if divider != nil { divider.length = 18 }
         monitors.forEach { NSEvent.removeMonitor($0) }
     }
@@ -288,7 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let action = NSMenuItem(title: "検証用メニュー", action: #selector(fixtureClicked), keyEquivalent: "")
         action.target = self
         menu.addItem(action)
-        item.menu = menu
+        if CommandLine.arguments.contains("--fixture-action") {
+            item.button?.target = self
+            item.button?.action = #selector(openFixtureWindow)
+        } else { item.menu = menu }
         fixtureItems.append(item)
         if CommandLine.arguments.contains("--fixture-hidden") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -299,6 +407,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { spacer.length = 10000 }
             }
         }
+    }
+    @objc func openFixtureWindow() {
+        let window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 300, height: 180), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "検証用アプリ画面"
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        fixtureWindow = window
     }
     @objc func fixtureClicked() { NSLog("MenuDrawer fixture action") }
 }
