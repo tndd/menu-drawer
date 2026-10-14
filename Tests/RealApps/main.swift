@@ -86,7 +86,6 @@ func run() throws {
         return find(unsafeBitCast(raw,to:AXUIElement.self)) { text($0).contains("収納したアイコン") }
     }
     func openSettings() throws {
-        if find(app,where: { text($0) == "選択を保存" }) != nil { return }
         guard let toggle = toggleButton() else { throw NSError(domain:"MenuDrawerUI",code:1) }
         let frame = rect(toggle)
         for type in [CGEventType.rightMouseDown,.rightMouseUp] {
