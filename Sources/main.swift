@@ -97,12 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggle.button?.target = self
         toggle.button?.action = #selector(togglePanel)
         toggle.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        divider = NSStatusBar.system.statusItem(withLength: 18)
+        divider = NSStatusBar.system.statusItem(withLength: 0)
         divider.autosaveName = "DrawerDivider"
-        divider.button?.title = "│"
-        divider.button?.toolTip = "この区切りより左のアイコンを収納します"
-        divider.button?.target = self
-        divider.button?.action = #selector(showSetup)
+        divider.button?.title = ""
+        divider.button?.isEnabled = false
+        divider.button?.setAccessibilityElement(false)
         if !selectedKeys.isEmpty, AXIsProcessTrusted() {
             draftKeys = selectedKeys
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.storeItems() }
@@ -346,8 +345,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         returnTimer?.invalidate()
         temporary = nil
         panel?.orderOut(nil)
-        divider.length = 18
-        divider.button?.title = "│"
+        divider.length = 0
+        divider.button?.title = ""
         isStored = false
     }
 
@@ -463,7 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
         operations.sync { } // ドラッグのマウスアップを送り終えてから終了する。
-        if divider != nil { divider.length = 18 }
+        if divider != nil { divider.length = 0 }
         monitors.forEach { NSEvent.removeMonitor($0) }
     }
 
