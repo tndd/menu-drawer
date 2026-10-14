@@ -83,6 +83,11 @@ func run() throws {
     try require(FileManager.default.fileExists(atPath: CommandLine.arguments[2]), "実パネルの描画出力がありません")
     press(fixtureButton!)
     try require(waitUntil { popupExists(pid: fixture.processIdentifier) }, "パネルから元アプリのメニューが開きませんでした")
+    // AXPress の応答期限は1.5秒。応答待ちの最中に検証プロセスを停止すると、
+    // メニューは表示済みでも対象消失によるエラーになるため、応答完了を待って片付ける。
+    Thread.sleep(forTimeInterval: 2)
+    let alert = find(app) { text($0).contains("のメニューを開けませんでした") }
+    try require(alert == nil, "メニュー表示後に操作エラーが出ました")
     print("設定 → 収納 → トレイボタン → 下方向のパネル → 元メニュー表示: 成功")
 }
 do { try run() } catch { print(error.localizedDescription); exit(1) }
