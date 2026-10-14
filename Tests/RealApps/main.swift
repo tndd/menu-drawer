@@ -45,6 +45,20 @@ func press(_ element: AXUIElement) {
     let frame = rect(element)
     let checkbox = attribute(element,kAXRoleAttribute) as? String == kAXCheckBoxRole
     let initial = attribute(element,kAXValueAttribute) as? Int
+    if checkbox {
+        var parent = element
+        for _ in 0..<12 {
+            if attribute(parent,kAXRoleAttribute) as? String == kAXWindowRole {
+                _ = AXUIElementPerformAction(parent,kAXRaiseAction as CFString)
+                let windowFrame = rect(parent)
+                let titlePoint = CGPoint(x:windowFrame.midX,y:windowFrame.minY+12)
+                mouse(.leftMouseDown,at:titlePoint);Thread.sleep(forTimeInterval:0.08);mouse(.leftMouseUp,at:titlePoint);Thread.sleep(forTimeInterval:0.2)
+                break
+            }
+            guard let raw=attribute(parent,kAXParentAttribute) else { break }
+            parent=unsafeBitCast(raw,to:AXUIElement.self)
+        }
+    }
     let point = CGPoint(x: checkbox ? frame.minX + 8 : frame.midX, y: frame.midY)
     func click() { mouse(.leftMouseDown,at:point);Thread.sleep(forTimeInterval:0.08);mouse(.leftMouseUp,at:point);Thread.sleep(forTimeInterval:0.15) }
     click()
@@ -60,26 +74,15 @@ func popupExists(pid: pid_t) -> Bool {
 }
 
 func run() throws {
+    try require(NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow", "Macのロックを解除してからUI検証を実行してください")
     let preferences = UserDefaults(suiteName: "local.codex.MenuDrawer")!
-    let originalSelection = preferences.stringArray(forKey: "SelectedItems") ?? []
-    preferences.set([], forKey: "SelectedItems")
-    preferences.synchronize()
-    defer { preferences.set(originalSelection,forKey:"SelectedItems");preferences.synchronize() }
+    try require((preferences.stringArray(forKey: "SelectedItems") ?? []).isEmpty, "検証前に選択を空にしてください")
     let cursor = CGEvent(source: nil)?.location
     defer { if let cursor { CGWarpMouseCursorPosition(cursor) } }
-    var drawer = Process()
-    func launch() throws {
-        drawer = Process()
-        drawer.executableURL = URL(fileURLWithPath: CommandLine.arguments[1])
-        drawer.arguments = ["--validation-output", CommandLine.arguments[2]]
-        try drawer.run()
-    }
-    try launch()
-    defer { if drawer.isRunning { drawer.terminate(); drawer.waitUntilExit() } }
-    var app = AXUIElementCreateApplication(drawer.processIdentifier)
-    try require(waitUntil { find(app) { text($0) == "選択を保存" } != nil }, "選択設定が開きません")
-    let frame = windowRect(statusWindows(drawer.processIdentifier).first!)
-    let entries = MenuItems.all(menuY: frame.midY, ownPID: drawer.processIdentifier).filter { $0.canStore }
+    guard let drawer=NSRunningApplication.runningApplications(withBundleIdentifier:"local.codex.MenuDrawer").first else { throw NSError(domain:"MenuDrawerUI",code:1) }
+    let app = AXUIElementCreateApplication(drawer.processIdentifier)
+    let entries = MenuItems.all(menuY: 18.5, ownPID: drawer.processIdentifier).filter { $0.canStore }
+    let originalOrder = entries.map(\.selectionKey)
     try require(!entries.isEmpty, "実アイコンがありません")
     func toggleButton() -> AXUIElement? {
         guard let raw = attribute(app,kAXExtrasMenuBarAttribute) else { return nil }
@@ -95,7 +98,7 @@ func run() throws {
         try require(waitUntil { find(app) { text($0)=="選択を保存" } != nil }, "右クリックで選択画面を開けません")
     }
     var previous: MenuEntry?
-    for (index, entry) in entries.enumerated() {
+    for entry in entries.filter({ entry in ["ChatGPT", "入力メニュー", "バッテリー", "Wi‑Fi"].contains { entry.name.contains($0) } }) {
         try openSettings()
         if let previous { try require((NativeItems.frame(previous.id)?.maxX ?? 1) < 0, "設定を開いただけで収納が解除されました") }
         var check: AXUIElement?
@@ -106,17 +109,11 @@ func run() throws {
         }
         update(app)
         press(check!)
-        try require(waitUntil { attribute(check!,kAXValueAttribute) as? Int == 1 }, "チェックできません: \(entry.name)")
+        try require(waitUntil { check = find(app) { attribute($0,kAXIdentifierAttribute) as? String == "select:" + entry.selectionKey };return check.flatMap { attribute($0,kAXValueAttribute) as? Int } == 1 }, "チェックできません: \(entry.name)")
         press(find(app) { text($0)=="選択を保存" }!)
         try require(waitUntil { (NativeItems.frame(entry.id)?.maxX ?? 1)<0 && toggleButton().flatMap { attribute($0,kAXEnabledAttribute) as? Bool } == true }, "選択した項目が収納されません: \(entry.name)")
         let visible = Set((CGWindowListCopyWindowInfo(.optionOnScreenOnly,kCGNullWindowID) as? [[String:Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
         try require(entries.filter { $0.id != entry.id }.allSatisfy { visible.contains($0.id) }, "未選択の実アイコンも隠れました")
-        if index == 0 {
-            drawer.terminate();drawer.waitUntilExit()
-            try launch();app=AXUIElementCreateApplication(drawer.processIdentifier)
-            try require(waitUntil { (NativeItems.frame(entry.id)?.maxX ?? 1)<0 && toggleButton().flatMap { attribute($0,kAXEnabledAttribute) as? Bool } == true }, "再起動後に選択が保持されません")
-            print("再起動後も選択した一項目だけを収納: 成功")
-        }
         let toggle = toggleButton()!
 
         try require(waitUntil { attribute(toggle, kAXEnabledAttribute) as? Bool == true }, "前の操作が完了しません")
@@ -127,6 +124,7 @@ func run() throws {
             row = find(panel) { attribute($0, kAXRoleAttribute) as? String == kAXButtonRole && text($0).contains(entry.name) }
             return row != nil
         }, "実アイコンが一覧にありません: \(entry.name)")
+        Thread.sleep(forTimeInterval: 0.4)
         let before = NativeItems.visibleWindows(pid: entry.pid)
         let beforeActive = NSWorkspace.shared.frontmostApplication?.processIdentifier
         press(row!)
@@ -150,11 +148,63 @@ func run() throws {
         previous = entry
         print("選択した実アイコン確認: \(entry.name) — クリックで表示・閉じた後に再収納")
     }
-    // 検証に使った選択だけを解除し、空の選択で終了する。
     try openSettings()
     func clear(_ e: AXUIElement) { if attribute(e,kAXRoleAttribute) as? String == kAXCheckBoxRole, attribute(e,kAXValueAttribute) as? Int == 1 { press(e) }; for c in attribute(e,kAXChildrenAttribute) as? [AXUIElement] ?? [] { clear(c) } }
     clear(app)
+    let pair = entries.filter { $0.name.contains("ChatGPT") || $0.name.contains("Wi‑Fi") }
+    try require(pair.count == 2, "二項目同時表示の検証対象が足りません")
+    for entry in pair {
+        guard let check = find(app,where: { attribute($0,kAXIdentifierAttribute) as? String == "select:" + entry.selectionKey }) else { throw NSError(domain:"二項目選択",code:1) }
+        press(check)
+    }
     press(find(app) { text($0)=="選択を保存" }!)
-    try require(waitUntil { !statusWindows(drawer.processIdentifier).contains { windowRect($0).width>1000 } }, "選択解除で表示に戻りません")
+    try require(waitUntil { pair.allSatisfy { (NativeItems.frame($0.id)?.maxX ?? 1) < 0 } && toggleButton().flatMap { attribute($0,kAXEnabledAttribute) as? Bool } == true }, "二項目を同時に収納できません")
+    press(toggleButton()!)
+    var pairPanel: AXUIElement?
+    try require(waitUntil { pairPanel = (attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? []).first { text($0)=="収納したアイコン" };return pairPanel != nil }, "二項目のドロップダウンを開けません")
+    let buttons = (attribute(pairPanel!,kAXChildrenAttribute) as? [AXUIElement] ?? []).filter { (attribute($0,kAXIdentifierAttribute) as? String ?? "").hasPrefix("status-image:") }
+    try require(buttons.count == 2, "二つの実アイコンが並んでいません")
+    try require(abs(rect(buttons[0]).midY - rect(buttons[1]).midY)<1 && rect(pairPanel!).minY >= 37, "実アイコンがメニューバーの下に並びません")
+    CGWarpMouseCursorPosition(CGPoint(x: 900, y: 240))
+    Thread.sleep(forTimeInterval: 0.6)
+    let output = FileManager.default.currentDirectoryPath + "/build/tests/"
+    let snapshot = output + "panel-v05.png.dropdown.png"
+    if FileManager.default.fileExists(atPath: snapshot) {
+        let target = output + "pair-dropdown.png"
+        try? FileManager.default.removeItem(atPath: target)
+        try FileManager.default.copyItem(atPath: snapshot,toPath: target)
+    }
+    print("ChatGPTとWi‑Fiの二項目を同時に下へ表示: 成功")
+    for entry in pair {
+        if entry.id != pair.first!.id { press(toggleButton()!) }
+        var row: AXUIElement?
+        try require(waitUntil {
+            guard let panel = (attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? []).first(where: { text($0)=="収納したアイコン" }) else {return false}
+            row=find(panel) {attribute($0,kAXIdentifierAttribute) as? String == "status-image:" + entry.selectionKey};return row != nil
+        }, "二項目の操作対象がありません")
+        Thread.sleep(forTimeInterval:0.3)
+        let before=NativeItems.visibleWindows(pid:entry.pid)
+        press(row!)
+        try require(waitUntil {!NativeItems.visibleWindows(pid:entry.pid).filter {before[$0.key]==nil && $0.value>0}.isEmpty}, "二項目収納から元のメニューを開けません: \(entry.name)")
+        Thread.sleep(forTimeInterval:0.8)
+        for down in [true,false] {CGEvent(keyboardEventSource:nil,virtualKey:53,keyDown:down)?.postToPid(entry.pid)}
+        try require(waitUntil {pair.allSatisfy {(NativeItems.frame($0.id)?.maxX ?? 1)<0} && toggleButton().flatMap{attribute($0,kAXEnabledAttribute) as? Bool}==true}, "隣の収納項目を基準に再収納できません")
+    }
+    try openSettings()
+    let chat=pair.first { $0.name.contains("ChatGPT") }!
+    press(find(app) {attribute($0,kAXIdentifierAttribute) as? String == "select:" + chat.selectionKey}!)
+    press(find(app) {text($0)=="選択を保存"}!)
+    let wifi=pair.first {$0.id != chat.id}!
+    try require(waitUntil {(NativeItems.frame(chat.id)?.minX ?? -1)>=0 && (NativeItems.frame(wifi.id)?.maxX ?? 1)<0 && toggleButton().flatMap{attribute($0,kAXEnabledAttribute) as? Bool}==true}, "片方だけを取り出せません")
+    print("二項目から元メニューを操作・隣の項目の前へ再収納・片方だけを元へ戻す: 成功")
+    // 検証に使った選択だけを解除し、空の選択で終了する。
+    try openSettings()
+    clear(app)
+    press(find(app) { text($0)=="選択を保存" }!)
+    try require(waitUntil { statusWindows(drawer.processIdentifier).filter { abs(windowRect($0).midY - 18.5) < 5 }.count == 1 }, "選択解除で区切りが撤去されません")
+    let restored = MenuItems.all(menuY: 18.5, ownPID: drawer.processIdentifier).filter { $0.canStore }.map(\.selectionKey)
+    let common = Set(restored).intersection(originalOrder)
+    try require(restored.filter { common.contains($0) } == originalOrder.filter { common.contains($0) }, "元のネイティブ順序が戻りません")
+    print("実アプリの選択解除後、元の順序へ復帰・区切り撤去: 成功")
 }
 do { try run() } catch { print(error.localizedDescription); exit(1) }

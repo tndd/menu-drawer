@@ -2,7 +2,7 @@ import Cocoa
 import ApplicationServices
 
 // macOSのステータス項目を実際に移動・クリックする境界。
-// 画面の画像は取得しない。51はAppKitのイベントに入るウィンドウ番号のフィールド。
+// 51はAppKitのイベントに入るウィンドウ番号のフィールド。
 enum NativeItems {
     enum Failure: Error { case missingItem, eventUnavailable, moveFailed }
     struct Anchor { let id: CGWindowID; let rightSide: Bool }
@@ -18,7 +18,7 @@ enum NativeItems {
         let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
         var result: [CGWindowID: Int] = [:]
         for row in rows where row[kCGWindowOwnerPID as String] as? pid_t == pid {
-            if let id = row[kCGWindowNumber as String] as? CGWindowID, let layer = row[kCGWindowLayer as String] as? Int, layer != 25 { result[id] = layer }
+            if let id = row[kCGWindowNumber as String] as? CGWindowID, let layer = row[kCGWindowLayer as String] as? Int, layer != 25, layer != 24 { result[id] = layer }
         }
         return result
     }

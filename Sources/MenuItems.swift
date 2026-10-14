@@ -6,7 +6,7 @@ struct MenuEntry {
     let pid: pid_t
     let name: String
     let frame: CGRect
-    let image: NSImage?
+    var image: NSImage?
     var element: AXUIElement? = nil
     var selectionKey: String = ""
     var canStore: Bool = true
@@ -24,7 +24,6 @@ enum MenuItems {
                   let frame = CGRect(dictionaryRepresentation: bounds),
                   DrawerGeometry.containsItem(frame, divider: divider) else { return nil }
             if childrenByPID[pid] == nil { childrenByPID[pid] = menuBarChildren(pid: pid) }
-            // 画面収録を必要とするウィンドウ名・画像は取得しない。
             // AX側でも実在を確認し、非表示の古いウィンドウを一覧へ混ぜない。
             guard let element = matchingElement(in: childrenByPID[pid] ?? [], frame: frame) else { return nil }
             let application = NSRunningApplication(processIdentifier: pid)
@@ -36,7 +35,7 @@ enum MenuItems {
             let index = children.firstIndex { CFEqual($0, element) } ?? 0
             let key = (application?.bundleIdentifier ?? application?.bundleURL?.path ?? owner) + "#" + (identifier.isEmpty ? String(index) : identifier)
             let fixed = ["com.apple.menuextra.clock", "com.apple.menuextra.controlcenter"].contains(identifier)
-            return MenuEntry(id: id, pid: pid, name: name, frame: frame, image: application?.icon, element: element, selectionKey: key, canStore: !fixed)
+            return MenuEntry(id: id, pid: pid, name: name, frame: frame, image: nil, element: element, selectionKey: key, canStore: !fixed)
         }.sorted { $0.frame.minX < $1.frame.minX }
     }
 

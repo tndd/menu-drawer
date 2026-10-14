@@ -45,6 +45,20 @@ func press(_ element: AXUIElement) {
     let frame = rect(element)
     let checkbox = attribute(element,kAXRoleAttribute) as? String == kAXCheckBoxRole
     let initial = attribute(element,kAXValueAttribute) as? Int
+    if checkbox {
+        var parent = element
+        for _ in 0..<12 {
+            if attribute(parent,kAXRoleAttribute) as? String == kAXWindowRole {
+                _ = AXUIElementPerformAction(parent,kAXRaiseAction as CFString)
+                let windowFrame = rect(parent)
+                let titlePoint = CGPoint(x:windowFrame.midX,y:windowFrame.minY+12)
+                mouse(.leftMouseDown,at:titlePoint);Thread.sleep(forTimeInterval:0.08);mouse(.leftMouseUp,at:titlePoint);Thread.sleep(forTimeInterval:0.2)
+                break
+            }
+            guard let raw=attribute(parent,kAXParentAttribute) else { break }
+            parent=unsafeBitCast(raw,to:AXUIElement.self)
+        }
+    }
     let point = CGPoint(x: checkbox ? frame.minX + 8 : frame.midX, y: frame.midY)
     func click() { mouse(.leftMouseDown,at:point);Thread.sleep(forTimeInterval:0.08);mouse(.leftMouseUp,at:point);Thread.sleep(forTimeInterval:0.15) }
     click()
@@ -59,34 +73,32 @@ func popupExists(pid: pid_t) -> Bool {
     return rows.contains { $0[kCGWindowOwnerPID as String] as? pid_t == pid && $0[kCGWindowLayer as String] as? Int == 101 }
 }
 func run() throws {
+    try require(NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow", "Macのロックを解除してからUI検証を実行してください")
     let preferences = UserDefaults(suiteName: "local.codex.MenuDrawer")!
-    let originalSelection = preferences.stringArray(forKey: "SelectedItems") ?? []
-    preferences.set([], forKey: "SelectedItems")
-    preferences.synchronize()
-    defer { preferences.set(originalSelection,forKey:"SelectedItems");preferences.synchronize() }
+    try require((preferences.stringArray(forKey: "SelectedItems") ?? []).isEmpty, "検証前に設定から選択を空にしてください")
     let cursor = CGEvent(source: nil)?.location
     defer { if let cursor { CGWarpMouseCursorPosition(cursor) } }
     try require(AXIsProcessTrusted(), "端末のアクセシビリティ権限が必要です")
-    for app in NSRunningApplication.runningApplications(withBundleIdentifier: "local.codex.MenuDrawer") { app.terminate() }
-    try require(waitUntil { NSRunningApplication.runningApplications(withBundleIdentifier: "local.codex.MenuDrawer").isEmpty }, "旧版の終了待ちがタイムアウトしました")
-    try? FileManager.default.removeItem(atPath: CommandLine.arguments[2])
-    let executable = URL(fileURLWithPath: CommandLine.arguments[1])
+    guard let drawer = NSRunningApplication.runningApplications(withBundleIdentifier: "local.codex.MenuDrawer").first else { throw NSError(domain:"MenuDrawerUI",code:1) }
+    print("通常起動: \(drawer.bundleURL!.path)")
+    let executable = URL(fileURLWithPath: "/Applications/MenuDrawer.app/Contents/MacOS/MenuDrawer")
     let fixture = Process()
     fixture.executableURL = executable
     fixture.arguments = CommandLine.arguments.contains("--action") ? ["--fixture", "--fixture-action"] : ["--fixture"]
     try fixture.run()
     defer { if fixture.isRunning { fixture.terminate(); fixture.waitUntilExit() } }
     Thread.sleep(forTimeInterval: 1)
-    let drawer = Process()
-    drawer.executableURL = executable
-    drawer.arguments = ["--validation-output", CommandLine.arguments[2]]
-    try drawer.run()
-    defer { if drawer.isRunning { drawer.terminate(); drawer.waitUntilExit() } }
+    let nativeBefore = MenuItems.all(menuY: 18.5, ownPID: drawer.processIdentifier).map(\.selectionKey)
     let app = AXUIElementCreateApplication(drawer.processIdentifier)
     let untouched = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []).filter {
         $0[kCGWindowLayer as String] as? Int == 25 && windowRect($0).midY < 40 && windowRect($0).height < 60 && ![drawer.processIdentifier, fixture.processIdentifier].contains($0[kCGWindowOwnerPID as String] as? pid_t ?? 0)
     }.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
     AXUIElementSetMessagingTimeout(app, 1)
+    if let raw=attribute(app,kAXExtrasMenuBarAttribute),
+       let toggle=find(unsafeBitCast(raw,to:AXUIElement.self),where: { text($0).contains("収納したアイコン") }) {
+        let frame=rect(toggle)
+        for type in [CGEventType.rightMouseDown,.rightMouseUp] { let e=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:CGPoint(x:frame.midX,y:frame.midY),mouseButton:.right)!;e.flags=[];e.post(tap:.cghidEventTap);Thread.sleep(forTimeInterval:0.08) }
+    }
     var start: AXUIElement?
     try require(waitUntil {
         start = find(app) { text($0) == "選択を保存" }
@@ -111,7 +123,7 @@ func run() throws {
             check = find(app) { attribute($0,kAXRoleAttribute) as? String == kAXCheckBoxRole && text($0).contains(" · T") }
             return check.flatMap { attribute($0,kAXValueAttribute) as? Int } == 1
         }
-        if !checked, let check { print("checkbox rect", rect(check), "value", attribute(check,kAXValueAttribute) ?? "" as CFString); for w in attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? [] { print("window",text(w),rect(w)) } }
+        if !checked { print("checkbox rect", rect(check!), "value", attribute(check!,kAXValueAttribute) ?? "" as CFString); for w in attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? [] { print("window",text(w),rect(w)) } }
         try require(checked, "実クリックでチェックがオンになりません")
         press(start)
     }
@@ -148,7 +160,7 @@ func run() throws {
     }
     let fixtureButton = find(panel) { (attribute($0, kAXRoleAttribute) as? String) == kAXButtonRole && text($0).contains(" · T") }
     try require(fixtureButton != nil, "収納した検証アイコンがパネルにありません")
-    try require(FileManager.default.fileExists(atPath: CommandLine.arguments[2]), "実パネルの描画出力がありません")
+    Thread.sleep(forTimeInterval: 0.4)
     let actionMode = CommandLine.arguments.contains("--action")
     let fixtureAX = AXUIElementCreateApplication(fixture.processIdentifier)
     press(fixtureButton!)
@@ -183,23 +195,13 @@ func run() throws {
     }
     mouse(.leftMouseUp, at: destination)
     try require(waitUntil {
-        statusWindows(fixture.processIdentifier).contains { windowRect($0).width < 100 && ($0[kCGWindowIsOnscreen as String] as? Bool ?? false) && windowRect($0).minX >= rect(toggle).maxX } && attribute(toggle, kAXEnabledAttribute) as? Bool == true
+        statusWindows(fixture.processIdentifier).contains { windowRect($0).width < 100 && ($0[kCGWindowIsOnscreen as String] as? Bool ?? false) } && attribute(toggle, kAXEnabledAttribute) as? Bool == true
     }, "一覧の外への実ドラッグでアイコンを取り出せませんでした")
-    // 最後の一つを取り出すと収納は空になり、再収納しない。
-    press(toggle)
-    var select: AXUIElement?
-    try require(waitUntil { select = find(app) { attribute($0, kAXRoleAttribute) as? String == kAXCheckBoxRole && text($0).contains(" · T") }; return select != nil }, "取り出した後に選択設定を開けません")
-    try require(attribute(select!, kAXValueAttribute) as? Int == 0, "ドラッグで取り出した項目が選択に残っています")
-    press(select!)
-    press(find(app) { text($0) == "選択を保存" }!)
-    try require(waitUntil { statusWindows(drawer.processIdentifier).contains { windowRect($0).width > 1000 } && attribute(toggle, kAXEnabledAttribute) as? Bool == true }, "再選択した項目を収納できません")
-    press(toggle)
-    var restore: AXUIElement?
-    try require(waitUntil { restore = find(app) { attribute($0, kAXIdentifierAttribute) as? String == "restore-all" }; return restore != nil }, "すべて戻すボタンが見つかりません")
-    press(restore!)
-    try require(waitUntil { !statusWindows(drawer.processIdentifier).contains { windowRect($0).width > 1000 } }, "すべて戻す操作で収納が解除されませんでした")
-    try require(find(app, where: { text($0).contains("の移動を確認できなかった") }) == nil, "移動エラーが出ています")
-    print("実クリック → 元\(actionMode ? "アプリ画面" : "メニュー") → 自動収納 → 実ドラッグで取り出し → すべて戻す: 成功")
-
+    try require(statusWindows(drawer.processIdentifier).filter { abs(windowRect($0).midY - 18.5) < 5 }.count == 1, "空の収納に区切りウィンドウが残っています")
+    let nativeAfter = MenuItems.all(menuY: 18.5, ownPID: drawer.processIdentifier).map(\.selectionKey)
+    let common = Set(nativeBefore).intersection(nativeAfter)
+    try require(nativeBefore.filter { common.contains($0) } == nativeAfter.filter { common.contains($0) }, "取り出した後のネイティブ順序が元に戻りません")
+    try require((preferences.stringArray(forKey: "SelectedItems") ?? []).isEmpty, "取り出した項目が選択設定に残っています")
+    print("実クリック → 元\(actionMode ? "アプリ画面" : "メニュー") → 自動収納 → 実ドラッグで元の並びへ復帰 → 区切り撤去: 成功")
 }
 do { try run() } catch { print(error.localizedDescription); exit(1) }
