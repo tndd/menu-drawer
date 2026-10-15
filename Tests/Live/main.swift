@@ -55,10 +55,27 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
         }
         let initial = StatusWindows.list(excludingPID:drawer.processIdentifier)
         let initialWithDrawer = StatusWindows.list()
+        let originalDrawerPID = drawer.processIdentifier
         let originalOrder = initialWithDrawer.map { $0.pid == drawer.processIdentifier ? "drawer" : String($0.id) }
         func sameOrderWithDrawer() -> Bool {
             let current = StatusWindows.list().filter { icon in icon.pid == drawer.processIdentifier || initial.contains { $0.id == icon.id } }
             return current.map { $0.pid == drawer.processIdentifier ? "drawer" : String($0.id) } == originalOrder
+        }
+        func checkRestoredPositions() throws {
+            let current = StatusWindows.list()
+            let before = initialWithDrawer
+            let after = before.compactMap { old in current.first { item in old.pid == originalDrawerPID ? item.pid == drawer.processIdentifier : item.id == old.id } }
+            guard current.count == before.count, before.count == after.count, let oldRight = before.last, let newRight = after.last else { throw SwitchFailure(message:"検証中に対象アイコンが増減しました") }
+            var widthChange: CGFloat = 0
+            var largest: CGFloat = 0
+            for index in before.indices.reversed() {
+                widthChange += after[index].frame.width-before[index].frame.width
+                // 時計やバッテリーの表示幅が変わった分の自然な詰めだけを補正する。
+                let expected = before[index].frame.minX + newRight.frame.maxX-oldRight.frame.maxX-widthChange
+                largest = max(largest,abs(after[index].frame.minX-expected))
+            }
+            guard largest <= 1.5 else { throw SwitchFailure(message:"元の位置に戻っていません：最大\(largest)ポイント") }
+            print("座標復元：表示幅の変動を除く最大差\(largest)ポイント")
         }
         let targets = ["com.openai.codex","com.apple.TextInputMenuAgent"].compactMap { b in initial.first { $0.bundleID == b } }
         guard targets.count == 2 else { throw SwitchFailure(message:"ChatGPTと入力メニューの実アイコンが必要です") }
@@ -71,10 +88,17 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             guard before.isEmpty == hidden else { try? await closeMenu(); throw SwitchFailure(message:"検証前のチェック状態が想定外です。設定は変更しません") }
             try checkSection(item,!hidden)
             // 実際のメニュー操作を行う。コアエンジンへの直接呼び出しでは代用しない。
+            let cursorBefore = CGEvent(source:nil)?.location
             let result = AXUIElementPerformAction(item,kAXPickAction as CFString)
             guard result == .success else { try? await closeMenu(); throw SwitchFailure(message:"メニュー項目の選択に失敗しました：\(result.rawValue)") }
             try await wait("収納状態を確認できません：\(icon.title)") { outside(icon.id) == hidden }
-            try await Task.sleep(nanoseconds:200_000_000)
+            try await Task.sleep(nanoseconds:1_000_000_000)
+            guard let start = cursorBefore, let end = CGEvent(source:nil)?.location, hypot(start.x-end.x,start.y-end.y) <= 1.5 else { throw SwitchFailure(message:"操作後にカーソル位置が変わりました") }
+            let controls = StatusWindows.list().filter { $0.pid == drawer.processIdentifier && $0.frame.width < 100 }
+            guard controls.count == 1, let control = controls.first, let screen = NSScreen.screens.first,
+                  control.frame.minX >= (screen.auxiliaryTopRightArea?.minX ?? screen.frame.minX), control.frame.maxX <= screen.frame.maxX else {
+                throw SwitchFailure(message:"MenuDrawer自身のボタンが表示領域にありません")
+            }
             try await openMenu()
             guard let fresh = row(icon.id), (attribute(fresh,kAXMenuItemMarkCharAttribute) as? String ?? "").isEmpty != hidden else { try? await closeMenu(); throw SwitchFailure(message:"チェック状態が実際の収納と一致しません") }
             try checkSection(fresh,hidden)
@@ -88,6 +112,7 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
                 try await choose(left,true); changed.append(left)
                 try await choose(left,false); changed.removeAll { $0.id == left.id }
                 guard sameOrderWithDrawer() else { throw SwitchFailure(message:"左側の項目とMenuDrawerボタンが入れ替わりました") }
+                try checkRestoredPositions()
                 print("MenuDrawerボタンの左側の項目を出し入れしても、ボタンを含む並びを維持")
             } else { throw SwitchFailure(message:"左側の復元を検証するための一時アイコンがありません") }
             for icon in targets.reversed() { try await choose(icon,true); changed.append(icon) }
@@ -95,6 +120,7 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             guard others.allSatisfy({ !outside($0.id) }) else { throw SwitchFailure(message:"未選択アイコンまで収納されました") }
             for icon in targets.reversed() { try await choose(icon,false); changed.removeAll { $0.id == icon.id } }
             guard sameOrderWithDrawer() else { throw SwitchFailure(message:"右の項目から収納・取り出しすると並びが変わりました") }
+            try checkRestoredPositions()
             // 通常終了で戻し、保存した選択が背景での再起動後にも反映されることを確認する。
             let saved = targets[0]
             try await choose(saved,true); changed.append(saved)
@@ -117,10 +143,11 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             let final = StatusWindows.list(excludingPID:drawer.processIdentifier).filter { icon in initial.contains { $0.id == icon.id } }
             guard final.map(\.id) == initial.map(\.id), targets.allSatisfy({ icon in final.contains { $0.id == icon.id && $0.pid == icon.pid } }) else { throw SwitchFailure(message:"元の並びまたは対象アプリのPIDが一致しません") }
             guard sameOrderWithDrawer() else { throw SwitchFailure(message:"再起動後にMenuDrawerボタンとの並びが変わりました") }
+            try checkRestoredPositions()
             print("インストール版の実メニュー検証：成功。対象アプリは再起動せず、元の並びへ復帰")
         } catch {
             try? await closeMenu()
-            if !changed.isEmpty {
+            if !changed.isEmpty || initial.contains(where:{ outside($0.id) }) {
                 try? await openMenu()
                 if let all = find(bar,{ title($0) == "全て取り出す" }) { _ = AXUIElementPerformAction(all,kAXPickAction as CFString) }
                 try? await Task.sleep(nanoseconds:1_000_000_000)

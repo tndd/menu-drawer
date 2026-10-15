@@ -6,6 +6,10 @@ import ApplicationServices
     private let transport = ItemTransport()
     private(set) var lastCursor: CursorReport?
     private var moving = false
+    private func userIsIdle() -> Bool {
+        let modifiers = CGEventSource.flagsState(.combinedSessionState).intersection([.maskCommand,.maskControl,.maskAlternate,.maskShift])
+        return modifiers.isEmpty && !CGEventSource.buttonState(.combinedSessionState,button:.left) && !CGEventSource.buttonState(.combinedSessionState,button:.right) && CGEventSource.secondsSinceLastEventType(.combinedSessionState,eventType:.mouseMoved) > 0.25
+    }
 
     func move(_ icon: MenuIcon, beside targetID: CGWindowID, left: Bool) async throws {
         guard AXIsProcessTrusted() else { throw SwitchFailure(message:"アイコンの移動にはアクセシビリティの許可が必要です") }
@@ -15,14 +19,15 @@ import ApplicationServices
         // ユーザーがマウスや修飾キーを操作している間はドラッグを始めない。
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
-            let modifiers = CGEventSource.flagsState(.combinedSessionState).intersection([.maskCommand,.maskControl,.maskAlternate,.maskShift])
-            if modifiers.isEmpty && !CGEventSource.buttonState(.combinedSessionState,button:.left) && !CGEventSource.buttonState(.combinedSessionState,button:.right) && CGEventSource.secondsSinceLastEventType(.combinedSessionState,eventType:.mouseMoved) > 0.25 { break }
+            if userIsIdle() { break }
             try await Task.sleep(nanoseconds:50_000_000)
         }
         guard Date() < deadline else { throw SwitchFailure(message:"マウスと修飾キーを離してから再試行してください") }
         let initial = try await StatusWindows.waitForStableFrame(icon.id)
         let destination = try await StatusWindows.waitForStableFrame(targetID)
         if abs(left ? initial.maxX-destination.minX : initial.minX-destination.maxX) < 2 { return }
+        // フレーム安定待ちの間にユーザーが操作を再開した場合、ドラッグを始めない。
+        guard userIsIdle() else { throw SwitchFailure(message:"マウス操作が再開されたため、移動を中止しました") }
         guard let cursor = CGEvent(source:nil)?.location, let source = CGEventSource(stateID:.hidSystemState) else { throw SwitchFailure(message:"マウスの状態を取得できません") }
         let end = CGPoint(x:left ? destination.minX : destination.maxX,y:destination.midY)
         source.setLocalEventsFilterDuringSuppressionState([.permitLocalMouseEvents,.permitLocalKeyboardEvents,.permitSystemDefinedEvents],state:.eventSuppressionStateRemoteMouseDrag)
