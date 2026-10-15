@@ -10,6 +10,5 @@ elif [[ "${1:-}" == "--real" ]]; then
     swiftc -swift-version 5 Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Tests/Real/main.swift -framework Cocoa -o build/tests/real-icons
     build/tests/real-icons
 elif [[ "${1:-}" == "--live" ]]; then
-    swiftc -swift-version 5 -parse-as-library Sources/Failure.swift Sources/StatusWindows.swift Tests/Live/main.swift -framework Cocoa -o build/tests/menu-live
-    build/tests/menu-live
+    scripts/test_native.sh --live
 fi

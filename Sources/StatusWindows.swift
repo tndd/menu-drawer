@@ -44,6 +44,18 @@ enum StatusWindows {
         }
         throw SwitchFailure(message:"メニューバーのウィンドウを確認できません：ID=\(id)")
     }
+    @MainActor static func waitForStableFrame(_ id: CGWindowID) async throws -> CGRect {
+        var previous = try await waitForFrame(id)
+        var stableSince = Date()
+        let deadline = Date().addingTimeInterval(1.5)
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds:20_000_000)
+            guard let current = frame(id) else { continue }
+            if current != previous { previous = current; stableSince = Date() }
+            else if Date().timeIntervalSince(stableSince) >= 0.08 { return current }
+        }
+        throw SwitchFailure(message:"メニューバーの位置が安定しませんでした")
+    }
     private static func value(_ e: AXUIElement, _ key: String) -> CFTypeRef? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(e,key as CFString,&value) == .success else { return nil }

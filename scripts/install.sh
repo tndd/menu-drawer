@@ -2,8 +2,10 @@
 # 署名検証を先に済ませ、失敗したビルドや古い仮署名版で起動中アプリを上書きしない。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-python3 - <<'PY'
-import pathlib,tempfile,subprocess,shutil
+python3 - "${1:-}" <<'PY'
+import pathlib,tempfile,subprocess,shutil,sys
+if sys.argv[1] not in ('','--no-launch'):
+    raise SystemExit('指定できる引数は--no-launchだけです。')
 root=pathlib.Path('build')
 with tempfile.TemporaryDirectory(prefix='.install.',dir=root) as temp:
     subprocess.run(['ditto','-x','-k',str(root/'MenuDrawer.zip'),temp],check=True)
@@ -28,6 +30,7 @@ if apps.contains(where:{!$0.isTerminated}) { exit(2) }
         if backup.exists():backup.rename(dest)
         raise
     if backup.exists():shutil.rmtree(backup)
-subprocess.run(['open','-g','-a','/Applications/MenuDrawer.app'],check=True)
-print('固定署名版を/Applications/MenuDrawer.appへ配置しました。')
+if sys.argv[1] != '--no-launch':
+    subprocess.run(['open','-g','-a','/Applications/MenuDrawer.app'],check=True)
+print('固定署名版を/Applications/MenuDrawer.appへ配置しました。' + ('起動はしていません。' if sys.argv[1] == '--no-launch' else ''))
 PY

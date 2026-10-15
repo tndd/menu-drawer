@@ -20,8 +20,8 @@ import ApplicationServices
             try await Task.sleep(nanoseconds:50_000_000)
         }
         guard Date() < deadline else { throw SwitchFailure(message:"マウスと修飾キーを離してから再試行してください") }
-        let initial = try await StatusWindows.waitForFrame(icon.id)
-        let destination = try await StatusWindows.waitForFrame(targetID)
+        let initial = try await StatusWindows.waitForStableFrame(icon.id)
+        let destination = try await StatusWindows.waitForStableFrame(targetID)
         if abs(left ? initial.maxX-destination.minX : initial.minX-destination.maxX) < 2 { return }
         guard let cursor = CGEvent(source:nil)?.location, let source = CGEventSource(stateID:.hidSystemState) else { throw SwitchFailure(message:"マウスの状態を取得できません") }
         let end = CGPoint(x:left ? destination.minX : destination.maxX,y:destination.midY)
@@ -39,12 +39,17 @@ import ApplicationServices
         }
         do {
             try await transport.send(down,to:icon.pid)
-            // Ice同様、押下後のWindowServer側のフレーム反映を待つ。
+            // 押下中の位置にはドラッグ用の仮配置が混ざる。解放先は安定した開始前の位置を使う。
             try await Task.sleep(nanoseconds:50_000_000)
             try await transport.send(up,to:icon.pid)
-            let until = Date().addingTimeInterval(1)
+            let until = Date().addingTimeInterval(1.5)
+            var lastFrame: CGRect?
+            var stableSince = Date()
             while Date() < until {
-                if let a = StatusWindows.frame(icon.id), let b = StatusWindows.frame(targetID), abs(left ? a.maxX-b.minX : a.minX-b.maxX) < 2 { return }
+                if let a = StatusWindows.frame(icon.id), let b = StatusWindows.frame(targetID), abs(left ? a.maxX-b.minX : a.minX-b.maxX) < 2 {
+                    if a != lastFrame { lastFrame = a; stableSince = Date() }
+                    else if Date().timeIntervalSince(stableSince) >= 0.08 { return }
+                } else { lastFrame = nil; stableSince = Date() }
                 try await Task.sleep(nanoseconds:20_000_000)
             }
             throw SwitchFailure(message:"移動後のアイコンの並びを確認できませんでした")

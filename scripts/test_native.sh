@@ -2,7 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p build/tests
-swiftc -swift-version 5 Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Tests/Native/main.swift -framework Cocoa -o build/tests/movement
+if [[ "${1:-}" == "--live" ]]; then
+    swiftc -swift-version 5 -parse-as-library Sources/Failure.swift Sources/StatusWindows.swift Tests/Live/main.swift -framework Cocoa -o build/tests/menu-live
+else
+    swiftc -swift-version 5 Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Tests/Native/main.swift -framework Cocoa -o build/tests/movement
+fi
     swiftc Tests/Fixture/main.swift -framework Cocoa -o build/tests/fixture
     swiftc Tests/Fixture/cleanup.swift -framework Cocoa -o build/tests/fixture-cleanup
     fixture_stage=$(mktemp -d "$PWD/build/tests/fixtures.XXXXXX")
@@ -19,4 +23,8 @@ for name in ['A','B','C']:
     if name != 'C': subprocess.run(['open','-g',str(app)],check=True)
 PY
     sleep 2
-    build/tests/movement "$fixture_stage"
+    if [[ "${1:-}" == "--live" ]]; then
+        build/tests/menu-live
+    else
+        build/tests/movement "$fixture_stage"
+    fi

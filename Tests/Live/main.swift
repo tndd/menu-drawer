@@ -29,12 +29,19 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             while Date()<until { if predicate() { return }; try await Task.sleep(nanoseconds:50_000_000) }
             throw SwitchFailure(message:name)
         }
-        func openMenu() async throws {
-            _ = AXUIElementPerformAction(toggle,kAXPressAction as CFString)
-            try await wait("一覧が開きません") { find(bar,{ title($0) == "全て取り出す" }) != nil }
+        func menuIsVisible() -> Bool {
+            guard let menu = find(bar,{ attribute($0,kAXRoleAttribute) as? String == kAXMenuRole }), let raw = attribute(menu,kAXSizeAttribute) else { return false }
+            var size = CGSize.zero
+            return AXValueGetValue(unsafeBitCast(raw,to:AXValue.self),.cgSize,&size) && size.width > 0 && size.height > 0
         }
-        func closeMenu() {
+        func openMenu() async throws {
+            try await wait("前の一覧が閉じません") { !menuIsVisible() }
+            _ = AXUIElementPerformAction(toggle,kAXPressAction as CFString)
+            try await wait("一覧が開きません") { menuIsVisible() }
+        }
+        func closeMenu() async throws {
             if let menu = find(bar,{ attribute($0,kAXRoleAttribute) as? String == kAXMenuRole }) { _ = AXUIElementPerformAction(menu,kAXCancelAction as CFString) }
+            try await wait("一覧が閉じません") { !menuIsVisible() }
         }
         func row(_ id:CGWindowID) -> AXUIElement? { find(bar,{ attribute($0,kAXIdentifierAttribute) as? String == "status-\(id)" }) }
         func checkSection(_ item:AXUIElement,_ hidden:Bool) throws {
@@ -47,34 +54,47 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
                   hidden ? (upper < index && index < lower) : lower < index else { throw SwitchFailure(message:"収納中が上段、収納可能が下段になっていません") }
         }
         let initial = StatusWindows.list(excludingPID:drawer.processIdentifier)
+        let initialWithDrawer = StatusWindows.list()
+        let originalOrder = initialWithDrawer.map { $0.pid == drawer.processIdentifier ? "drawer" : String($0.id) }
+        func sameOrderWithDrawer() -> Bool {
+            let current = StatusWindows.list().filter { icon in icon.pid == drawer.processIdentifier || initial.contains { $0.id == icon.id } }
+            return current.map { $0.pid == drawer.processIdentifier ? "drawer" : String($0.id) } == originalOrder
+        }
         let targets = ["com.openai.codex","com.apple.TextInputMenuAgent"].compactMap { b in initial.first { $0.bundleID == b } }
         guard targets.count == 2 else { throw SwitchFailure(message:"ChatGPTと入力メニューの実アイコンが必要です") }
         func outside(_ id:CGWindowID) -> Bool { StatusWindows.frame(id).map { $0.maxX<=0 } ?? false }
         func choose(_ icon:MenuIcon,_ hidden:Bool) async throws {
             try await openMenu()
             guard let item = row(icon.id) else { throw SwitchFailure(message:"アイコンの項目がありません：\(icon.title)") }
-            guard (attribute(item,kAXEnabledAttribute) as? NSNumber)?.boolValue == true else { closeMenu(); throw SwitchFailure(message:"収納操作が無効です。固定署名版の初回アクセシビリティ許可が必要です") }
+            guard (attribute(item,kAXEnabledAttribute) as? NSNumber)?.boolValue == true else { try? await closeMenu(); throw SwitchFailure(message:"収納操作が無効です。固定署名版の初回アクセシビリティ許可が必要です") }
             let before = attribute(item,kAXMenuItemMarkCharAttribute) as? String ?? ""
-            guard before.isEmpty == hidden else { closeMenu(); throw SwitchFailure(message:"検証前のチェック状態が想定外です。設定は変更しません") }
+            guard before.isEmpty == hidden else { try? await closeMenu(); throw SwitchFailure(message:"検証前のチェック状態が想定外です。設定は変更しません") }
             try checkSection(item,!hidden)
             // 実際のメニュー操作を行う。コアエンジンへの直接呼び出しでは代用しない。
             let result = AXUIElementPerformAction(item,kAXPickAction as CFString)
-            guard result == .success else { closeMenu(); throw SwitchFailure(message:"メニュー項目の選択に失敗しました：\(result.rawValue)") }
+            guard result == .success else { try? await closeMenu(); throw SwitchFailure(message:"メニュー項目の選択に失敗しました：\(result.rawValue)") }
             try await wait("収納状態を確認できません：\(icon.title)") { outside(icon.id) == hidden }
             try await Task.sleep(nanoseconds:200_000_000)
             try await openMenu()
-            guard let fresh = row(icon.id), (attribute(fresh,kAXMenuItemMarkCharAttribute) as? String ?? "").isEmpty != hidden else { closeMenu(); throw SwitchFailure(message:"チェック状態が実際の収納と一致しません") }
+            guard let fresh = row(icon.id), (attribute(fresh,kAXMenuItemMarkCharAttribute) as? String ?? "").isEmpty != hidden else { try? await closeMenu(); throw SwitchFailure(message:"チェック状態が実際の収納と一致しません") }
             try checkSection(fresh,hidden)
-            closeMenu()
+            try await closeMenu()
             print("実メニュー：\(icon.title)を\(hidden ? "収納して上段へ" : "取り出して下段へ")、チェック状態と実ウィンドウ位置が一致")
             fflush(stdout)
         }
         var changed:[MenuIcon] = []
         do {
-            for icon in targets { try await choose(icon,true); changed.append(icon) }
+            if let button = initialWithDrawer.first(where:{ $0.pid == drawer.processIdentifier }), let left = initial.last(where:{ $0.frame.minX < button.frame.minX && $0.protectedReason == nil }) {
+                try await choose(left,true); changed.append(left)
+                try await choose(left,false); changed.removeAll { $0.id == left.id }
+                guard sameOrderWithDrawer() else { throw SwitchFailure(message:"左側の項目とMenuDrawerボタンが入れ替わりました") }
+                print("MenuDrawerボタンの左側の項目を出し入れしても、ボタンを含む並びを維持")
+            } else { throw SwitchFailure(message:"左側の復元を検証するための一時アイコンがありません") }
+            for icon in targets.reversed() { try await choose(icon,true); changed.append(icon) }
             let others = initial.filter { icon in !targets.contains { $0.id == icon.id } }
             guard others.allSatisfy({ !outside($0.id) }) else { throw SwitchFailure(message:"未選択アイコンまで収納されました") }
-            for icon in targets { try await choose(icon,false); changed.removeAll { $0.id == icon.id } }
+            for icon in targets.reversed() { try await choose(icon,false); changed.removeAll { $0.id == icon.id } }
+            guard sameOrderWithDrawer() else { throw SwitchFailure(message:"右の項目から収納・取り出しすると並びが変わりました") }
             // 通常終了で戻し、保存した選択が背景での再起動後にも反映されることを確認する。
             let saved = targets[0]
             try await choose(saved,true); changed.append(saved)
@@ -96,14 +116,15 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             print("通常終了で復帰し、背景での再起動後に保存した選択を再収納：成功")
             let final = StatusWindows.list(excludingPID:drawer.processIdentifier).filter { icon in initial.contains { $0.id == icon.id } }
             guard final.map(\.id) == initial.map(\.id), targets.allSatisfy({ icon in final.contains { $0.id == icon.id && $0.pid == icon.pid } }) else { throw SwitchFailure(message:"元の並びまたは対象アプリのPIDが一致しません") }
+            guard sameOrderWithDrawer() else { throw SwitchFailure(message:"再起動後にMenuDrawerボタンとの並びが変わりました") }
             print("インストール版の実メニュー検証：成功。対象アプリは再起動せず、元の並びへ復帰")
         } catch {
-            closeMenu()
+            try? await closeMenu()
             if !changed.isEmpty {
                 try? await openMenu()
                 if let all = find(bar,{ title($0) == "全て取り出す" }) { _ = AXUIElementPerformAction(all,kAXPickAction as CFString) }
                 try? await Task.sleep(nanoseconds:1_000_000_000)
-                closeMenu()
+                try? await closeMenu()
             }
             throw error
         }

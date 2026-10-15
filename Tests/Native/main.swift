@@ -32,10 +32,26 @@ import ApplicationServices
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow" else { throw SwitchFailure(message:"Macがロック中") }
         toggle = NSStatusBar.system.statusItem(withLength:24); toggle.button?.title = "T"
         try await Task.sleep(nanoseconds:100_000_000)
-        let initial = engine.items()
-        let fixtures = initial.filter { $0.bundleID.hasPrefix("local.codex.MenuDrawerTest.") }
+        let fixtures = engine.items().filter { $0.bundleID.hasPrefix("local.codex.MenuDrawerTest.") }
         try require(fixtures.count == 2,"検証アイコンが2個必要です：\(fixtures.count)")
         let a = fixtures[0]; let b = fixtures[1]
+        let controlID = CGWindowID(toggle.button!.window!.windowNumber)
+        // MenuDrawer自身のボタンの左にある項目を出し入れする条件を作る。
+        try await IconMover().move(a,beside:controlID,left:true)
+        let initial = engine.items()
+        let original = StatusWindows.list().map(\.id)
+        func sameOrder() -> Bool { StatusWindows.list().map(\.id).filter { original.contains($0) } == original }
+        try await engine.setHidden(a,true)
+        try await engine.setHidden(a,false)
+        try require(sameOrder(),"自身のボタンとアイコンが入れ替わりました")
+        print("自身のボタンの左の項目を出し入れしても並びを維持")
+        for (icon,hidden) in [(b,true),(a,true),(b,false),(a,false)] {
+            print("逆順操作：\(icon.id)を\(hidden ? "収納" : "復帰")"); fflush(stdout)
+            do { try await engine.setHidden(icon,hidden) }
+            catch { print("失敗時の並び：",StatusWindows.list().map { "\($0.id):\($0.frame.minX),\($0.frame.width)" }.joined(separator:" ")); throw error }
+        }
+        try require(sameOrder(),"右の項目から収納・取り出しすると並びが変わりました")
+        print("収納・取り出しの順番を変えても、自身のボタンを含め元の並びに復帰")
         let pids = Dictionary(uniqueKeysWithValues:fixtures.map { ($0.id,$0.pid) })
         try await engine.setHidden(a,true); try cursor()
         try require(outside(a.id) && !outside(b.id),"一つだけの選択収納に失敗")

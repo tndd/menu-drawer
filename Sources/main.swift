@@ -11,7 +11,7 @@ import ApplicationServices
     private var observers: [NSObjectProtocol] = []
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        toggle = NSStatusBar.system.statusItem(withLength:28)
+        toggle = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
         toggle.autosaveName = "DrawerToggle"
         toggle.button?.image = Brand.menuIcon()
         toggle.button?.setAccessibilityLabel("アイコン収納")
@@ -99,8 +99,8 @@ import ApplicationServices
         Task { @MainActor in
             do { try await operation() }
             catch {
-                notice = "処理を完了できませんでした"
-                let alert = NSAlert(); alert.messageText = notice!; alert.informativeText = error.localizedDescription + "\n収納境界を展開し、取り出せる状態に戻しています。"
+                notice = error.localizedDescription
+                let alert = NSAlert(); alert.messageText = "処理を完了できませんでした"; alert.informativeText = error.localizedDescription + "\n収納を解除し、透明な収納境界を撤去しました。"
                 alert.runModal()
             }
             working = false; refresh()
