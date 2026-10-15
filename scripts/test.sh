@@ -2,10 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p build/tests
-swiftc Sources/Geometry.swift Tests/main.swift -o build/tests/geometry
-build/tests/geometry
-if [[ "${1:-}" == "--integration" ]]; then
-    scripts/build.sh
-    swiftc -swift-version 5 -import-objc-header Sources/Capture.h Sources/Geometry.swift Sources/MenuItems.swift Tests/Integration/main.swift build/Capture.o -framework Cocoa -framework ApplicationServices -o build/tests/integration
-    build/tests/integration "$PWD/build/MenuDrawer.app/Contents/MacOS/MenuDrawer"
+swiftc -swift-version 5 -parse-as-library Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Tests/main.swift -framework Cocoa -o build/tests/unit
+build/tests/unit
+if [[ "${1:-}" == "--native" ]]; then
+    scripts/test_native.sh
+elif [[ "${1:-}" == "--real" ]]; then
+    swiftc -swift-version 5 Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Tests/Real/main.swift -framework Cocoa -o build/tests/real-icons
+    build/tests/real-icons
+elif [[ "${1:-}" == "--live" ]]; then
+    scripts/test_native.sh --live
 fi
