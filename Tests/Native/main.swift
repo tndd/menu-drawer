@@ -40,13 +40,27 @@ import ApplicationServices
         let a = fixtures[0]; let b = fixtures[1]
         let controlID = CGWindowID(toggle.button!.window!.windowNumber)
         // MenuDrawer自身のボタンの左にある項目を出し入れする条件を作る。
+        print("事前配置を開始"); fflush(stdout)
         try await IconMover().move(a,beside:controlID,left:true)
         let initial = engine.items()
         let original = StatusWindows.list().map(\.id)
         func sameOrder() -> Bool { StatusWindows.list().map(\.id).filter { original.contains($0) } == original }
+        print("最初の収納を開始"); fflush(stdout)
         try await engine.setHidden(a,true)
         try require(!outside(controlID),"収納と同時に操作ボタンまで画面外へ消えました")
+        // メニュー選択後の短いマウス移動を、取り出し前のフレーム安定待ち中に再現する。
+        try await Task.sleep(nanoseconds:400_000_000)
+        print("入力再開付きの取り出しを開始"); fflush(stdout)
+        let movement = Timer(timeInterval:0.08,repeats:false) { _ in
+            print("マウス移動を再現"); fflush(stdout)
+            if let point = CGEvent(source:nil)?.location {
+                CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:point,mouseButton:.left)?.post(tap:.cghidEventTap)
+            }
+        }
+        RunLoop.main.add(movement,forMode:.common)
+        defer { movement.invalidate() }
         try await engine.setHidden(a,false)
+        print("取り出し前の短いマウス移動後も、入力停止を待って復帰")
         try require(sameOrder(),"自身のボタンとアイコンが入れ替わりました")
         print("自身のボタンの左の項目を出し入れしても並びを維持")
         for (icon,hidden) in [(b,true),(a,true),(b,false),(a,false)] {
@@ -102,6 +116,24 @@ import ApplicationServices
         let own = windows.filter { $0[kCGWindowOwnerPID as String] as? pid_t == getpid() && $0[kCGWindowLayer as String] as? Int == 25 }
         try require(own.count == 1,"空の収納境界が残っています：\(own.count)")
         print("元の並びに復帰、対象アプリのPIDは不変、収納が空なら区切りウィンドウなし")
+        // 入力が止まらない場合は、待機上限で中止してドラッグしないことも確認する。
+        let blockedMover = IconMover()
+        let beforeInput = StatusWindows.frame(a.id)
+        let continuousInput = Timer(timeInterval:0.05,repeats:true) { _ in
+            if let point = CGEvent(source:nil)?.location {
+                CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:point,mouseButton:.left)?.post(tap:.cghidEventTap)
+            }
+        }
+        RunLoop.main.add(continuousInput,forMode:.common); continuousInput.fire()
+        defer { continuousInput.invalidate() }
+        do {
+            try await blockedMover.move(a,beside:b.id,left:true)
+            throw SwitchFailure(message:"入力継続中に移動処理が成功扱いになりました")
+        } catch let failure as SwitchFailure {
+            try require(failure.message == "マウスと修飾キーを離してから再試行してください", "入力継続時の中止理由が違います：\(failure.message)")
+        }
+        try require(blockedMover.lastCursor == nil && StatusWindows.frame(a.id) == beforeInput,"入力継続中にドラッグを開始しました")
+        print("入力が続く場合は待機上限で中止し、ドラッグも位置変更もなし")
     }
 }
 MainActor.assumeIsolated {
