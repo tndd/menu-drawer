@@ -16,18 +16,21 @@ import ApplicationServices
         guard !moving else { throw SwitchFailure(message:"アイコンを移動中です") }
         guard icon.protectedReason == nil else { throw SwitchFailure(message:icon.protectedReason!) }
         moving = true; defer { moving = false }
-        // ユーザーがマウスや修飾キーを操作している間はドラッグを始めない。
+        // 入力停止とフレーム安定を同じ待機枠で確認する。安定待ち中の短い入力では、
+        // 即座に失敗させず座標から確認し直し、操作中の位置へドラッグしない。
         let deadline = Date().addingTimeInterval(3)
+        var initial = CGRect.zero
+        var destination = CGRect.zero
         while Date() < deadline {
-            if userIsIdle() { break }
+            if userIsIdle() {
+                initial = try await StatusWindows.waitForStableFrame(icon.id)
+                destination = try await StatusWindows.waitForStableFrame(targetID)
+                if userIsIdle() { break }
+            }
             try await Task.sleep(nanoseconds:50_000_000)
         }
         guard Date() < deadline else { throw SwitchFailure(message:"マウスと修飾キーを離してから再試行してください") }
-        let initial = try await StatusWindows.waitForStableFrame(icon.id)
-        let destination = try await StatusWindows.waitForStableFrame(targetID)
         if abs(left ? initial.maxX-destination.minX : initial.minX-destination.maxX) < 2 { return }
-        // フレーム安定待ちの間にユーザーが操作を再開した場合、ドラッグを始めない。
-        guard userIsIdle() else { throw SwitchFailure(message:"マウス操作が再開されたため、移動を中止しました") }
         guard let cursor = CGEvent(source:nil)?.location, let source = CGEventSource(stateID:.hidSystemState) else { throw SwitchFailure(message:"マウスの状態を取得できません") }
         let end = CGPoint(x:left ? destination.minX : destination.maxX,y:destination.midY)
         source.setLocalEventsFilterDuringSuppressionState([.permitLocalMouseEvents,.permitLocalKeyboardEvents,.permitSystemDefinedEvents],state:.eventSuppressionStateRemoteMouseDrag)

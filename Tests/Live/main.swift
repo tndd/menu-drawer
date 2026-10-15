@@ -10,7 +10,7 @@ func find(_ root: AXUIElement,depth:Int=0,_ predicate:(AXUIElement)->Bool) -> AX
     for child in attribute(root,kAXChildrenAttribute) as? [AXUIElement] ?? [] { if let match = find(child,depth:depth+1,predicate) { return match } }
     return nil
 }
-func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribute].compactMap { attribute(e,$0) as? String }.first { !$0.isEmpty } ?? "" }
+func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribute,kAXValueAttribute].compactMap { attribute(e,$0) as? String }.first { !$0.isEmpty } ?? "" }
 @main struct MenuTests {
     @MainActor static func main() async {
         do { try await run() }
@@ -24,9 +24,20 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
         var bar = unsafeBitCast(raw,to:AXUIElement.self)
         guard var toggle = find(bar,{ title($0) == "アイコン収納" }) else { throw SwitchFailure(message:"新しい収納ボタンなし") }
         AXUIElementSetMessagingTimeout(toggle,0.3)
+        func checkAlert() throws {
+            let windows = attribute(app,kAXWindowsAttribute) as? [AXUIElement] ?? []
+            for window in windows {
+                if let message = find(window,{ title($0).contains("完了できませんでした") }) {
+                    let detail = find(window,{ attribute($0,kAXRoleAttribute) as? String == kAXStaticTextRole && title($0) != title(message) })
+                    let text = title(message) + "：" + (detail.map(title) ?? "")
+                    if let ok = find(window,{ title($0) == "OK" }) { _ = AXUIElementPerformAction(ok,kAXPressAction as CFString) }
+                    throw SwitchFailure(message:text)
+                }
+            }
+        }
         func wait(_ name:String,_ predicate:()->Bool) async throws {
             let until = Date().addingTimeInterval(10)
-            while Date()<until { if predicate() { return }; try await Task.sleep(nanoseconds:50_000_000) }
+            while Date()<until { try checkAlert(); if predicate() { return }; try await Task.sleep(nanoseconds:50_000_000) }
             throw SwitchFailure(message:name)
         }
         func menuIsVisible() -> Bool {
@@ -92,8 +103,9 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             let result = AXUIElementPerformAction(item,kAXPickAction as CFString)
             guard result == .success else { try? await closeMenu(); throw SwitchFailure(message:"メニュー項目の選択に失敗しました：\(result.rawValue)") }
             try await wait("収納状態を確認できません：\(icon.title)") { outside(icon.id) == hidden }
-            try await Task.sleep(nanoseconds:1_000_000_000)
-            guard let start = cursorBefore, let end = CGEvent(source:nil)?.location, hypot(start.x-end.x,start.y-end.y) <= 1.5 else { throw SwitchFailure(message:"操作後にカーソル位置が変わりました") }
+            try await Task.sleep(nanoseconds:2_000_000_000)
+            try checkAlert()
+            guard let start = cursorBefore, let end = CGEvent(source:nil)?.location, hypot(start.x-end.x,start.y-end.y) <= 1.5 else { throw SwitchFailure(message:"操作後にカーソル位置が変わりました：\(String(describing:cursorBefore))→\(String(describing:CGEvent(source:nil)?.location))") }
             let controls = StatusWindows.list().filter { $0.pid == drawer.processIdentifier && $0.frame.width < 100 }
             guard controls.count == 1, let control = controls.first, let screen = NSScreen.screens.first,
                   control.frame.minX >= (screen.auxiliaryTopRightArea?.minX ?? screen.frame.minX), control.frame.maxX <= screen.frame.maxX else {
