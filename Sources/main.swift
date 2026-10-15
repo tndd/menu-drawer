@@ -1,22 +1,30 @@
 import Cocoa
 import ApplicationServices
 
-@MainActor final class AppDelegate: NSObject,NSApplicationDelegate,NSMenuDelegate {
+@MainActor final class AppDelegate: NSObject,NSApplicationDelegate {
     private let engine = StorageEngine()
-    private var toggle: NSStatusItem!
-    private let menu = NSMenu()
+    private var toggle: NSStatusItem?
+    private var panel: DrawerWindow!
     private var working = false
     private var terminating = false
     private var notice: String?
     private var observers: [NSObjectProtocol] = []
+    private var hideMenuIcon: Bool {
+        get { UserDefaults.standard.object(forKey:"hideMenuBarIcon") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue,forKey:"hideMenuBarIcon") }
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        toggle = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
-        toggle.autosaveName = "DrawerToggle"
-        toggle.button?.image = Brand.menuIcon()
-        toggle.button?.setAccessibilityLabel("アイコン収納")
-        toggle.button?.toolTip = "隠すアイコンを選ぶ"
-        menu.autoenablesItems = false; menu.delegate = self; toggle.menu = menu
+        panel = DrawerWindow()
+        panel.onMove = { [weak self] icon,hidden in self?.move(icon,hidden) }
+        panel.onRestore = { [weak self] in self?.restoreAll() }
+        panel.onReload = { [weak self] in self?.reload() }
+        panel.onQuit = { [weak self] in if self?.working == false { NSApp.terminate(nil) } }
+        panel.onPermission = {
+            if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+        }
+        panel.onVisibility = { [weak self] in self?.setMenuIconHidden($0) }
+        updateMenuIcon()
         for name in [NSWorkspace.didLaunchApplicationNotification,NSWorkspace.didTerminateApplicationNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName:name,object:nil,queue:.main) { [weak self] _ in
                 Task { @MainActor in
@@ -28,79 +36,64 @@ import ApplicationServices
         observers.append(NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main) { [weak self] _ in
             Task { @MainActor in await self?.reconcile() }
         })
-        refresh()
+        refresh(); panel.present()
         Task { @MainActor in
             try? await Task.sleep(nanoseconds:500_000_000)
             await reconcile()
         }
     }
-    private func info(_ title: String,identifier: String? = nil) {
-        let row = NSMenuItem(title:title,action:nil,keyEquivalent:""); row.isEnabled = false
-        if let identifier { row.identifier = NSUserInterfaceItemIdentifier(identifier) }
-        menu.addItem(row)
+    func applicationShouldHandleReopen(_ sender: NSApplication,hasVisibleWindows flag: Bool) -> Bool {
+        if panel != nil { refresh(); panel.present() }; return false
     }
-    private func command(_ title: String,_ action: Selector) {
-        let row = NSMenuItem(title:title,action:action,keyEquivalent:""); row.target = self; row.isEnabled = !working; menu.addItem(row)
-    }
-    func menuWillOpen(_ menu: NSMenu) { if menu === self.menu { refresh() } }
-    private func refresh() {
-        menu.removeAllItems()
-        let trusted = AXIsProcessTrusted()
-        info(working ? "アイコンを処理しています…" : notice ?? "隠すアイコンを選択（✓は収納中）")
-        if !trusted { command("アクセシビリティを許可…",#selector(requestPermission)) }
-        info("再起動・画面収録は不要です")
-        menu.addItem(.separator())
-        let items = engine.items().filter { $0.protectedReason == nil }
-        let titles = Dictionary(grouping:items,by: \.title)
-        var occurrences: [String:Int] = [:]
-        for hidden in [true,false] {
-            let group = items.filter { engine.selectedIDs.contains($0.id) == hidden }
-            info("\(hidden ? "収納中" : "収納できるアイコン")（\(group.count)）",identifier:hidden ? "section-hidden" : "section-available")
-            if group.isEmpty { info(hidden ? "まだ収納していません" : "収納できるアイコンはありません") }
-            for icon in group {
-                occurrences[icon.title,default:0] += 1
-                var title = icon.title
-                if (titles[title]?.count ?? 0) > 1 { title += " [\(occurrences[icon.title]!)]" }
-                let row = NSMenuItem(title:title,action:#selector(toggleItem(_:)),keyEquivalent:"")
-                row.identifier = NSUserInterfaceItemIdentifier("status-\(icon.id)")
-                row.target = self; row.representedObject = icon; row.state = hidden ? .on : .off
-                row.isEnabled = trusted && !working
-                row.toolTip = hidden ? "選ぶと元の並びへ取り出します" : "このアイコンだけを収納します"
-                if let url = NSRunningApplication(processIdentifier:icon.pid)?.bundleURL {
-                    let image = NSWorkspace.shared.icon(forFile:url.path); image.size = NSSize(width:18,height:18); row.image = image
-                }
-                menu.addItem(row)
-            }
-            if hidden { menu.addItem(.separator()) }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    @objc private func showPanel() { refresh(); panel.present() }
+    private func updateMenuIcon() {
+        engine.controlRequired = !hideMenuIcon
+        if hideMenuIcon {
+            if let toggle { NSStatusBar.system.removeStatusItem(toggle) }
+            toggle = nil
+        } else if toggle == nil {
+            // 非表示から戻す項目を、収納境界の右側へ配置する。
+            UserDefaults.standard.set(0,forKey:"NSStatusItem Preferred Position DrawerToggle")
+            let item = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
+            item.autosaveName = "DrawerToggle"; item.button?.image = Brand.menuIcon()
+            item.button?.setAccessibilityLabel("MenuDrawerを開く")
+            item.button?.target = self; item.button?.action = #selector(showPanel)
+            toggle = item
         }
-        menu.addItem(.separator())
-        command("全て取り出す",#selector(restoreAll))
-        command("一覧を再読み込み",#selector(reload))
-        command("MenuDrawerを終了",#selector(quitApp))
-        toggle.button?.toolTip = working ? "アイコンを処理しています…" : "収納中：\(engine.count)個"
     }
-    @objc private func requestPermission() {
-        menu.cancelTracking()
-        if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+    private func setMenuIconHidden(_ hidden: Bool) {
+        guard !working else { return }
+        hideMenuIcon = hidden; updateMenuIcon()
+        run {
+            if let number = self.toggle?.button?.window?.windowNumber, number > 0 {
+                _ = try await StatusWindows.waitForStableFrame(CGWindowID(number))
+            }
+            try await self.engine.rehide()
+        }
     }
-    @objc private func toggleItem(_ sender: NSMenuItem) {
-        guard let icon = sender.representedObject as? MenuIcon, !working else { return }
-        let hidden = !engine.selectedIDs.contains(icon.id)
+    private func refresh() {
+        panel.update(items:engine.items(),selected:engine.selectedIDs,working:working,notice:notice,hideMenuIcon:hideMenuIcon,trusted:AXIsProcessTrusted())
+        toggle?.button?.toolTip = working ? "アイコンを処理しています…" : "収納中：\(engine.count)個"
+    }
+    private func move(_ icon: MenuIcon,_ hidden: Bool) {
         run {
             try await self.engine.setHidden(icon,hidden)
-            self.notice = "\(icon.title)：\(hidden ? "収納しました" : "元へ戻しました")"
+            self.notice = nil
         }
     }
-    @objc private func restoreAll() { run { try await self.engine.restoreAll(keepSelection:false); self.notice = "全て取り出しました" } }
-    @objc private func reload() { run { try await self.engine.reconcile(); self.notice = nil } }
+    private func restoreAll() { run { try await self.engine.restoreAll(keepSelection:false); self.notice = nil } }
+    private func reload() { run { try await self.engine.reconcile(); self.notice = nil } }
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !working else { return }
-        menu.cancelTracking(); working = true; refresh()
+        working = true; refresh()
         Task { @MainActor in
             do { try await operation() }
             catch {
                 notice = error.localizedDescription
-                let alert = NSAlert(); alert.messageText = "処理を完了できませんでした"; alert.informativeText = error.localizedDescription + "\n収納を解除し、透明な収納境界を撤去しました。"
+                panel.present()
+                let alert = NSAlert(); alert.messageText = "処理を完了できませんでした"
+                alert.informativeText = error.localizedDescription + "\n収納を解除し、透明な収納境界を撤去しました。"
                 alert.runModal()
             }
             working = false; refresh()
@@ -108,12 +101,11 @@ import ApplicationServices
     }
     private func reconcile() async {
         guard AXIsProcessTrusted(), !working, !terminating else { return }
-        working = true
+        working = true; refresh()
         do { try await engine.reconcile() }
         catch { notice = error.localizedDescription }
         working = false; refresh()
     }
-    @objc private func quitApp() { if !working { NSApp.terminate(nil) } }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if working { return .terminateCancel }
         if engine.count == 0 { return .terminateNow }
