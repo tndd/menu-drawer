@@ -34,8 +34,10 @@ import ApplicationServices
             await reconcile()
         }
     }
-    private func info(_ title: String) {
-        let row = NSMenuItem(title:title,action:nil,keyEquivalent:""); row.isEnabled = false; menu.addItem(row)
+    private func info(_ title: String,identifier: String? = nil) {
+        let row = NSMenuItem(title:title,action:nil,keyEquivalent:""); row.isEnabled = false
+        if let identifier { row.identifier = NSUserInterfaceItemIdentifier(identifier) }
+        menu.addItem(row)
     }
     private func command(_ title: String,_ action: Selector) {
         let row = NSMenuItem(title:title,action:action,keyEquivalent:""); row.target = self; row.isEnabled = !working; menu.addItem(row)
@@ -48,25 +50,29 @@ import ApplicationServices
         if !trusted { command("アクセシビリティを許可…",#selector(requestPermission)) }
         info("再起動・画面収録は不要です")
         menu.addItem(.separator())
-        let items = engine.items()
+        let items = engine.items().filter { $0.protectedReason == nil }
         let titles = Dictionary(grouping:items,by: \.title)
         var occurrences: [String:Int] = [:]
-        for icon in items {
-            occurrences[icon.title,default:0] += 1
-            var title = icon.title
-            if (titles[title]?.count ?? 0) > 1 { title += " [\(occurrences[icon.title]!)]" }
-            if icon.protectedReason != nil { title += "（macOSで保護）" }
-            let row = NSMenuItem(title:title,action:#selector(toggleItem(_:)),keyEquivalent:"")
-            row.identifier = NSUserInterfaceItemIdentifier("status-\(icon.id)")
-            row.target = self; row.representedObject = icon; row.state = engine.selectedIDs.contains(icon.id) ? .on : .off
-            row.isEnabled = trusted && !working && icon.protectedReason == nil
-            row.toolTip = icon.protectedReason ?? (row.state == .on ? "選択解除で元の並びへ戻します" : "このアイコンだけを収納します")
-            if let url = NSRunningApplication(processIdentifier:icon.pid)?.bundleURL {
-                let image = NSWorkspace.shared.icon(forFile:url.path); image.size = NSSize(width:18,height:18); row.image = image
+        for hidden in [true,false] {
+            let group = items.filter { engine.selectedIDs.contains($0.id) == hidden }
+            info("\(hidden ? "収納中" : "収納できるアイコン")（\(group.count)）",identifier:hidden ? "section-hidden" : "section-available")
+            if group.isEmpty { info(hidden ? "まだ収納していません" : "収納できるアイコンはありません") }
+            for icon in group {
+                occurrences[icon.title,default:0] += 1
+                var title = icon.title
+                if (titles[title]?.count ?? 0) > 1 { title += " [\(occurrences[icon.title]!)]" }
+                let row = NSMenuItem(title:title,action:#selector(toggleItem(_:)),keyEquivalent:"")
+                row.identifier = NSUserInterfaceItemIdentifier("status-\(icon.id)")
+                row.target = self; row.representedObject = icon; row.state = hidden ? .on : .off
+                row.isEnabled = trusted && !working
+                row.toolTip = hidden ? "選ぶと元の並びへ取り出します" : "このアイコンだけを収納します"
+                if let url = NSRunningApplication(processIdentifier:icon.pid)?.bundleURL {
+                    let image = NSWorkspace.shared.icon(forFile:url.path); image.size = NSSize(width:18,height:18); row.image = image
+                }
+                menu.addItem(row)
             }
-            menu.addItem(row)
+            if hidden { menu.addItem(.separator()) }
         }
-        if items.isEmpty { info("アイコンを取得できません。一覧を再読み込みしてください。") }
         menu.addItem(.separator())
         command("全て取り出す",#selector(restoreAll))
         command("一覧を再読み込み",#selector(reload))

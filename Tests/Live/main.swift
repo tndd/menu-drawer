@@ -37,6 +37,15 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             if let menu = find(bar,{ attribute($0,kAXRoleAttribute) as? String == kAXMenuRole }) { _ = AXUIElementPerformAction(menu,kAXCancelAction as CFString) }
         }
         func row(_ id:CGWindowID) -> AXUIElement? { find(bar,{ attribute($0,kAXIdentifierAttribute) as? String == "status-\(id)" }) }
+        func checkSection(_ item:AXUIElement,_ hidden:Bool) throws {
+            guard let rawParent = attribute(item,kAXParentAttribute) else { throw SwitchFailure(message:"メニューの親がありません") }
+            let parent = unsafeBitCast(rawParent,to:AXUIElement.self)
+            let children = attribute(parent,kAXChildrenAttribute) as? [AXUIElement] ?? []
+            let ids = children.map { attribute($0,kAXIdentifierAttribute) as? String ?? "" }
+            let itemID = attribute(item,kAXIdentifierAttribute) as? String ?? ""
+            guard let upper = ids.firstIndex(of:"section-hidden"), let lower = ids.firstIndex(of:"section-available"), let index = ids.firstIndex(of:itemID), upper < lower,
+                  hidden ? (upper < index && index < lower) : lower < index else { throw SwitchFailure(message:"収納中が上段、収納可能が下段になっていません") }
+        }
         let initial = StatusWindows.list(excludingPID:drawer.processIdentifier)
         let targets = ["com.openai.codex","com.apple.TextInputMenuAgent"].compactMap { b in initial.first { $0.bundleID == b } }
         guard targets.count == 2 else { throw SwitchFailure(message:"ChatGPTと入力メニューの実アイコンが必要です") }
@@ -47,6 +56,7 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             guard (attribute(item,kAXEnabledAttribute) as? NSNumber)?.boolValue == true else { closeMenu(); throw SwitchFailure(message:"収納操作が無効です。固定署名版の初回アクセシビリティ許可が必要です") }
             let before = attribute(item,kAXMenuItemMarkCharAttribute) as? String ?? ""
             guard before.isEmpty == hidden else { closeMenu(); throw SwitchFailure(message:"検証前のチェック状態が想定外です。設定は変更しません") }
+            try checkSection(item,!hidden)
             // 実際のメニュー操作を行う。コアエンジンへの直接呼び出しでは代用しない。
             let result = AXUIElementPerformAction(item,kAXPickAction as CFString)
             guard result == .success else { closeMenu(); throw SwitchFailure(message:"メニュー項目の選択に失敗しました：\(result.rawValue)") }
@@ -54,8 +64,9 @@ func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribu
             try await Task.sleep(nanoseconds:200_000_000)
             try await openMenu()
             guard let fresh = row(icon.id), (attribute(fresh,kAXMenuItemMarkCharAttribute) as? String ?? "").isEmpty != hidden else { closeMenu(); throw SwitchFailure(message:"チェック状態が実際の収納と一致しません") }
+            try checkSection(fresh,hidden)
             closeMenu()
-            print("実メニュー：\(icon.title)を\(hidden ? "収納" : "復帰")、チェック状態と実ウィンドウ位置が一致")
+            print("実メニュー：\(icon.title)を\(hidden ? "収納して上段へ" : "取り出して下段へ")、チェック状態と実ウィンドウ位置が一致")
             fflush(stdout)
         }
         var changed:[MenuIcon] = []
