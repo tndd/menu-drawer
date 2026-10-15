@@ -10,7 +10,7 @@ func find(_ root: AXUIElement,depth:Int=0,_ predicate:(AXUIElement)->Bool) -> AX
     for child in attribute(root,kAXChildrenAttribute) as? [AXUIElement] ?? [] { if let match = find(child,depth:depth+1,predicate) { return match } }
     return nil
 }
-func title(_ e:AXUIElement) -> String { attribute(e,kAXTitleAttribute) as? String ?? attribute(e,kAXDescriptionAttribute) as? String ?? "" }
+func title(_ e:AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttribute].compactMap { attribute(e,$0) as? String }.first { !$0.isEmpty } ?? "" }
 @main struct MenuTests {
     @MainActor static func main() async {
         do { try await run() }
@@ -18,11 +18,11 @@ func title(_ e:AXUIElement) -> String { attribute(e,kAXTitleAttribute) as? Strin
     }
     @MainActor static func run() async throws {
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow" else { throw SwitchFailure(message:"Macがロック中") }
-        guard let drawer = NSRunningApplication.runningApplications(withBundleIdentifier:"local.codex.MenuDrawer").first else { throw SwitchFailure(message:"MenuDrawer未起動") }
-        let app = AXUIElementCreateApplication(drawer.processIdentifier); AXUIElementSetMessagingTimeout(app,0.3)
+        guard var drawer = NSRunningApplication.runningApplications(withBundleIdentifier:"local.codex.MenuDrawer").first else { throw SwitchFailure(message:"MenuDrawer未起動") }
+        var app = AXUIElementCreateApplication(drawer.processIdentifier); AXUIElementSetMessagingTimeout(app,0.3)
         guard let raw = attribute(app,kAXExtrasMenuBarAttribute) else { throw SwitchFailure(message:"メニューバーなし") }
-        let bar = unsafeBitCast(raw,to:AXUIElement.self)
-        guard let toggle = find(bar,{ title($0) == "アイコン収納" }) else { throw SwitchFailure(message:"新しい収納ボタンなし") }
+        var bar = unsafeBitCast(raw,to:AXUIElement.self)
+        guard var toggle = find(bar,{ title($0) == "アイコン収納" }) else { throw SwitchFailure(message:"新しい収納ボタンなし") }
         AXUIElementSetMessagingTimeout(toggle,0.3)
         func wait(_ name:String,_ predicate:()->Bool) async throws {
             let until = Date().addingTimeInterval(10)
@@ -48,7 +48,8 @@ func title(_ e:AXUIElement) -> String { attribute(e,kAXTitleAttribute) as? Strin
             let before = attribute(item,kAXMenuItemMarkCharAttribute) as? String ?? ""
             guard before.isEmpty == hidden else { closeMenu(); throw SwitchFailure(message:"検証前のチェック状態が想定外です。設定は変更しません") }
             // 実際のメニュー操作を行う。コアエンジンへの直接呼び出しでは代用しない。
-            _ = AXUIElementPerformAction(item,kAXPressAction as CFString)
+            let result = AXUIElementPerformAction(item,kAXPickAction as CFString)
+            guard result == .success else { closeMenu(); throw SwitchFailure(message:"メニュー項目の選択に失敗しました：\(result.rawValue)") }
             try await wait("収納状態を確認できません：\(icon.title)") { outside(icon.id) == hidden }
             try await Task.sleep(nanoseconds:200_000_000)
             try await openMenu()
@@ -63,6 +64,25 @@ func title(_ e:AXUIElement) -> String { attribute(e,kAXTitleAttribute) as? Strin
             let others = initial.filter { icon in !targets.contains { $0.id == icon.id } }
             guard others.allSatisfy({ !outside($0.id) }) else { throw SwitchFailure(message:"未選択アイコンまで収納されました") }
             for icon in targets { try await choose(icon,false); changed.removeAll { $0.id == icon.id } }
+            // 通常終了で戻し、保存した選択が背景での再起動後にも反映されることを確認する。
+            let saved = targets[0]
+            try await choose(saved,true); changed.append(saved)
+            guard drawer.terminate() else { throw SwitchFailure(message:"通常終了の要求に失敗しました") }
+            try await wait("通常終了後にアイコンが復帰しません") { drawer.isTerminated && !outside(saved.id) }
+            let afterQuit = StatusWindows.list(excludingPID:drawer.processIdentifier).filter { icon in initial.contains { $0.id == icon.id } }
+            guard afterQuit.map(\.id) == initial.map(\.id) else { throw SwitchFailure(message:"通常終了で元の並びに戻りません") }
+            let config = NSWorkspace.OpenConfiguration(); config.activates = false
+            drawer = try await NSWorkspace.shared.openApplication(at:URL(fileURLWithPath:"/Applications/MenuDrawer.app"),configuration:config)
+            app = AXUIElementCreateApplication(drawer.processIdentifier); AXUIElementSetMessagingTimeout(app,0.3)
+            try await wait("再起動後のメニューバーが取得できません") { attribute(app,kAXExtrasMenuBarAttribute) != nil }
+            guard let freshBar = attribute(app,kAXExtrasMenuBarAttribute) else { throw SwitchFailure(message:"再起動後のメニューバーなし") }
+            bar = unsafeBitCast(freshBar,to:AXUIElement.self)
+            try await wait("再起動後の収納ボタンがありません") { find(bar,{ title($0) == "アイコン収納" }) != nil }
+            guard let freshToggle = find(bar,{ title($0) == "アイコン収納" }) else { throw SwitchFailure(message:"再起動後の収納ボタンなし") }
+            toggle = freshToggle; AXUIElementSetMessagingTimeout(toggle,0.3)
+            try await wait("保存した選択が再起動後に反映されません") { outside(saved.id) }
+            try await choose(saved,false); changed.removeAll { $0.id == saved.id }
+            print("通常終了で復帰し、背景での再起動後に保存した選択を再収納：成功")
             let final = StatusWindows.list(excludingPID:drawer.processIdentifier).filter { icon in initial.contains { $0.id == icon.id } }
             guard final.map(\.id) == initial.map(\.id), targets.allSatisfy({ icon in final.contains { $0.id == icon.id && $0.pid == icon.pid } }) else { throw SwitchFailure(message:"元の並びまたは対象アプリのPIDが一致しません") }
             print("インストール版の実メニュー検証：成功。対象アプリは再起動せず、元の並びへ復帰")
@@ -70,7 +90,7 @@ func title(_ e:AXUIElement) -> String { attribute(e,kAXTitleAttribute) as? Strin
             closeMenu()
             if !changed.isEmpty {
                 try? await openMenu()
-                if let all = find(bar,{ title($0) == "全て取り出す" }) { _ = AXUIElementPerformAction(all,kAXPressAction as CFString) }
+                if let all = find(bar,{ title($0) == "全て取り出す" }) { _ = AXUIElementPerformAction(all,kAXPickAction as CFString) }
                 try? await Task.sleep(nanoseconds:1_000_000_000)
                 closeMenu()
             }
