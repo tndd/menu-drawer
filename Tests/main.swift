@@ -6,6 +6,8 @@ import Cocoa
         func check(_ ok: Bool,_ message: String) { precondition(ok,message); count += 1; print("成功：\(message)") }
         let actualDivider = CGRect(x:-1822,y:0,width:2956,height:37)
         check(!StorageEngine.controlsAreRight(of:actualDivider,frames:[]),"操作ボタンを確認できない場合は収納を許可しない")
+        check(StorageEngine.controlsAreRight(of:actualDivider,frames:[],required:false),"操作アイコンを非表示にした場合は、アイコンなしで収納できる")
+        check(!StorageEngine.controlsAreRight(of:actualDivider,frames:[CGRect(x:-1894,y:0,width:34,height:37)],required:false),"非表示モードでも実在する操作項目が収納側なら拒否する")
         check(!StorageEngine.controlsAreRight(of:actualDivider,frames:[CGRect(x:-1894,y:0,width:34,height:37)]),"消滅時の実測配置では境界の展開を拒否する")
         check(StorageEngine.controlsAreRight(of:actualDivider,frames:[CGRect(x:1134,y:0,width:34,height:37)]),"操作ボタンが境界の右側にある配置だけを許可する")
         check(!StorageEngine.controlsAreRight(of:actualDivider,frames:[CGRect(x:1134,y:0,width:34,height:37),CGRect(x:-1894,y:0,width:34,height:37)]),"複数の自アプリ項目のうち1個でも収納側にあれば拒否する")

@@ -12,9 +12,10 @@ struct RestorePosition {
 }
 
 @MainActor final class StorageEngine {
-    static func controlsAreRight(of divider: CGRect, frames: [CGRect]) -> Bool {
-        !frames.isEmpty && frames.allSatisfy { $0.minX >= divider.maxX - 1 }
+    static func controlsAreRight(of divider: CGRect, frames: [CGRect], required: Bool = true) -> Bool {
+        (!required || !frames.isEmpty) && frames.allSatisfy { $0.minX >= divider.maxX - 1 }
     }
+    var controlRequired = true
     private var boundary: NSStatusItem?
     private var selected: [CGWindowID:MenuIcon] = [:]
     private var positions: [CGWindowID:RestorePosition] = [:]
@@ -86,7 +87,7 @@ struct RestorePosition {
         let id = try boundaryID()
         let divider = try await StatusWindows.waitForStableFrame(id)
         let controls = restorationItems().filter { $0.pid == getpid() }
-        guard Self.controlsAreRight(of:divider,frames:controls.map(\.frame)) else {
+        guard Self.controlsAreRight(of:divider,frames:controls.map(\.frame),required:controlRequired) else {
             throw SwitchFailure(message:"収納境界が操作ボタンの右にあるため、アイコンを動かさず中止しました")
         }
         return id
@@ -121,7 +122,7 @@ struct RestorePosition {
         let id = try boundaryID()
         guard let divider = StatusWindows.frame(id) else { throw SwitchFailure(message:"収納境界の位置を確認できません") }
         let controls = restorationItems().filter { $0.pid == getpid() }
-        guard Self.controlsAreRight(of:divider,frames:controls.map(\.frame)) else {
+        guard Self.controlsAreRight(of:divider,frames:controls.map(\.frame),required:controlRequired) else {
             throw SwitchFailure(message:"操作ボタンが収納側にあるため、収納を中止しました")
         }
         let unselected = items().filter { !selectedIDs.contains($0.id) && abs($0.frame.midY-divider.midY)<2 && $0.frame.maxX <= divider.minX+1 }

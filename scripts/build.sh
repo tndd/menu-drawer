@@ -9,7 +9,7 @@ mkdir -p "$built_app/Contents/MacOS" "$built_app/Contents/Resources"
 cp Resources/MenuDrawer.icns "$built_app/Contents/Resources/"
 mkdir -p "$built_app/Contents/Resources/Notices"
 cp THIRD_PARTY.md THIRD_PARTY/Ice-GPL-3.0.txt "$built_app/Contents/Resources/Notices/"
-swiftc -swift-version 5 -target arm64-apple-macos14.0 -O Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Sources/Brand.swift Sources/main.swift -framework Cocoa -o "$built_app/Contents/MacOS/MenuDrawer"
+swiftc -swift-version 5 -target arm64-apple-macos14.0 -O Sources/Failure.swift Sources/StatusWindows.swift Sources/ItemTransport.swift Sources/IconMover.swift Sources/StorageEngine.swift Sources/Brand.swift Sources/DrawerWindow.swift Sources/main.swift -framework Cocoa -o "$built_app/Contents/MacOS/MenuDrawer"
 cat > "$built_app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
