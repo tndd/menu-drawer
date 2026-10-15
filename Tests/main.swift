@@ -1,54 +1,24 @@
 import Cocoa
-@MainActor final class FakeTarget: VisibilityTarget {
-    var isRunning: Bool
-    var savedVisibility: Bool?
-    var calls = [String]()
-    var refuseStop = false
-    var failStart = false
-    var failVerify = false
-    var failWrite = false
-    init(running: Bool, saved: Bool?) { isRunning = running; savedVisibility = saved }
-    func stop() async throws { calls.append("stop"); if refuseStop { throw SwitchFailure(message: "終了拒否") }; isRunning = false }
-    func writeVisibility(_ value: Bool?) throws { calls.append("write:\(value.map(String.init) ?? "nil")"); savedVisibility = value; if failWrite { failWrite = false; throw SwitchFailure(message: "書込失敗") } }
-    func start() async throws { calls.append("start"); if failStart { failStart = false; throw SwitchFailure(message: "起動失敗") }; isRunning = true }
-    func verifyVisibility(_ visible: Bool) async throws { calls.append("verify"); if failVerify { throw SwitchFailure(message: "表示不一致") } }
-}
+
 @main struct Tests {
-    @MainActor static func main() async throws {
+    @MainActor static func main() throws {
         var count = 0
-        func check(_ condition: Bool, _ label: String) { precondition(condition, label); count += 1; print("成功：\(label)") }
-        let hidden = FakeTarget(running: true, saved: nil)
-        try await VisibilitySwitch.apply(visible: false, to: hidden)
-        check(hidden.calls == ["stop", "write:false", "start", "verify"] && hidden.isRunning && hidden.savedVisibility == false, "終了後に非表示を書き、起動と実表示を検証")
-        try await VisibilitySwitch.apply(visible: true, to: hidden)
-        check(hidden.savedVisibility == true && hidden.isRunning, "表示へ戻す")
-        let refused = FakeTarget(running: true, saved: nil); refused.refuseStop = true
-        do { try await VisibilitySwitch.apply(visible: false, to: refused); fatalError("終了拒否を無視") } catch {}
-        check(refused.calls == ["stop"] && refused.isRunning && refused.savedVisibility == nil, "終了拒否では設定を変更しない")
-        for failure in ["write", "start", "verify"] {
-            let target = FakeTarget(running: true, saved: nil)
-            target.failWrite = failure == "write"; target.failStart = failure == "start"; target.failVerify = failure == "verify"
-            do { try await VisibilitySwitch.apply(visible: false, to: target); fatalError("失敗が必要") } catch {}
-            check(target.isRunning && target.savedVisibility == nil, "\(failure)失敗で元の未設定値と起動状態を復元")
-        }
-        let stopped = FakeTarget(running: false, saved: true); stopped.failVerify = true
-        do { try await VisibilitySwitch.apply(visible: false, to: stopped); fatalError("失敗が必要") } catch {}
-        check(!stopped.isRunning && stopped.savedVisibility == true, "元が停止中なら復旧後も停止")
-        let rollback = FakeTarget(running: true, saved: false); rollback.failVerify = true
-        do { try await VisibilitySwitch.apply(visible: true, to: rollback); fatalError("失敗が必要") } catch {}
-        check(rollback.savedVisibility == false && rollback.isRunning, "元の非表示設定も復元")
-        check(AppCatalog.visibilityKeys(["NSStatusItem Preferred Position TrayA", "NSStatusItem Visible TrayA", "NSStatusItem Visible TrayB", "other"]) == ["NSStatusItem Visible TrayA", "NSStatusItem Visible TrayB"], "アイコン名を保持して位置と表示の設定を重複排除")
-        let url = URL(fileURLWithPath: "/Applications/Example.app")
-        let single = AppEntry(id: "test.single", name: "単一", url: url, version: "1", keys: ["NSStatusItem Visible Tray"])
-        check(single.preferenceKey == "NSStatusItem Visible Tray", "選択したアプリ自身の設定を対象にする")
-        let missing = AppEntry(id: "test.missing", name: "設定なし", url: url, version: "1", keys: [])
-        check(missing.preferenceKey == nil && missing.blockReason != nil, "キーがないアプリでは書き込みを許可しない")
-        let multiple = AppEntry(id: "test.multiple", name: "複数", url: url, version: "1", keys: ["A", "B"])
-        check(multiple.preferenceKey == nil && multiple.blockReason != nil, "複数のアイコンを推測で変更しない")
-        let system = AppEntry(id: "com.apple.controlcenter", name: "システム", url: url, version: "1", keys: ["NSStatusItem Visible WiFi"])
-        check(system.preferenceKey == nil, "システム項目を書き換えない")
-        let update = AppEntry(id: single.id, name: single.name, url: url, version: "2", keys: single.keys)
-        check(single.verificationID != update.verificationID, "アプリ更新後に以前の検証済み表示を引き継がない")
+        func check(_ ok: Bool,_ message: String) { precondition(ok,message); count += 1; print("成功：\(message)") }
+        let plan = RestorePosition(right:[30,40],left:[20,10])
+        let a = plan.destination(available:[10,20,30,40],hidden:[30],boundary:99)
+        check(a.0 == 40 && a.1,"収納中の隣接アイコンを避け、次の表示中アイコンの左へ戻す")
+        let b = plan.destination(available:[10,20],hidden:[],boundary:99)
+        check(b.0 == 20 && !b.1,"右隣が終了していたら元の左隣の右へ戻す")
+        let c = plan.destination(available:[],hidden:[],boundary:99)
+        check(c.0 == 99 && !c.1,"隣接アイコンが全て終了していたら境界の表示側へ戻す")
+        let d = plan.destination(available:[10,20,30,40],hidden:[10,20,30,40],boundary:99)
+        check(d.0 == 99 && !d.1,"全ての隣接アイコンが収納中でも収納側に戻さない")
+        func icon(_ bundle: String,_ detail: String,_ width: CGFloat) -> MenuIcon { MenuIcon(id:1,pid:1,bundleID:bundle,name:"検証",detail:detail,frame:CGRect(x:0,y:0,width:width,height:37),stableKey:bundle) }
+        check(icon("third.party.app","",40).protectedReason == nil,"他アプリの設定キーの有無に依存せず移動対象にする")
+        check(icon("com.apple.controlcenter","Control Center",34).protectedReason != nil,"macOS固定のコントロールセンターを識別")
+        check(icon("com.apple.controlcenter","時計",150).protectedReason != nil,"macOS固定の時計を識別")
+        check(icon("com.apple.controlcenter","AudioVideoModule",34).protectedReason != nil,"録画・録音の保護表示を識別")
+        check(icon("com.apple.controlcenter","WiFi",34).protectedReason == nil,"動かせるシステムアイコンまで一律に除外しない")
         print("\(count)検証に成功")
     }
 }

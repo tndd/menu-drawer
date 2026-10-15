@@ -27,7 +27,7 @@ enum Brand {
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "アプリのアイコン表示"
+        image.accessibilityDescription = "アイコン収納"
         return image
     }
 }

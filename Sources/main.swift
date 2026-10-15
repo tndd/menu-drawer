@@ -1,125 +1,130 @@
 import Cocoa
+import ApplicationServices
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private var item: NSStatusItem!
+@MainActor final class AppDelegate: NSObject,NSApplicationDelegate,NSMenuDelegate {
+    private let engine = StorageEngine()
+    private var toggle: NSStatusItem!
     private let menu = NSMenu()
-    private var busy = false
+    private var working = false
+    private var terminating = false
     private var notice: String?
-    private var added: [String] { UserDefaults.standard.stringArray(forKey: "managedApplicationPaths") ?? [] }
-    private var verified: [String: [String]] {
-        get { UserDefaults.standard.dictionary(forKey: "verifiedVisibilityOperations") as? [String: [String]] ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "verifiedVisibilityOperations") }
-    }
+    private var observers: [NSObjectProtocol] = []
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        item = NSStatusBar.system.statusItem(withLength: 28)
-        item.autosaveName = "DrawerToggle"
-        item.button?.image = Brand.menuIcon()
-        item.button?.setAccessibilityLabel("アプリのアイコン表示")
-        item.button?.toolTip = "アプリごとのメニューバーアイコン表示"
-        menu.autoenablesItems = false
-        menu.delegate = self
-        item.menu = menu
+        toggle = NSStatusBar.system.statusItem(withLength:28)
+        toggle.autosaveName = "DrawerToggle"
+        toggle.button?.image = Brand.menuIcon()
+        toggle.button?.setAccessibilityLabel("アイコン収納")
+        toggle.button?.toolTip = "隠すアイコンを選ぶ"
+        menu.autoenablesItems = false; menu.delegate = self; toggle.menu = menu
+        for name in [NSWorkspace.didLaunchApplicationNotification,NSWorkspace.didTerminateApplicationNotification] {
+            observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName:name,object:nil,queue:.main) { [weak self] _ in
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds:1_000_000_000)
+                    await self?.reconcile()
+                }
+            })
+        }
+        observers.append(NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main) { [weak self] _ in
+            Task { @MainActor in await self?.reconcile() }
+        })
         refresh()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds:500_000_000)
+            await reconcile()
+        }
+    }
+    private func info(_ title: String) {
+        let row = NSMenuItem(title:title,action:nil,keyEquivalent:""); row.isEnabled = false; menu.addItem(row)
+    }
+    private func command(_ title: String,_ action: Selector) {
+        let row = NSMenuItem(title:title,action:action,keyEquivalent:""); row.target = self; row.isEnabled = !working; menu.addItem(row)
     }
     func menuWillOpen(_ menu: NSMenu) { if menu === self.menu { refresh() } }
-    private func info(_ title: String, in menu: NSMenu) {
-        let row = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        row.isEnabled = false
-        menu.addItem(row)
-    }
-    private func command(_ title: String, action: Selector, in menu: NSMenu, object: Any? = nil) {
-        let row = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        row.target = self; row.representedObject = object; row.isEnabled = !busy
-        menu.addItem(row)
-    }
     private func refresh() {
         menu.removeAllItems()
-        info(notice ?? "アプリごとのアイコン表示", in: menu)
-        info("切り替えには対象アプリの再起動が必要です", in: menu)
+        let trusted = AXIsProcessTrusted()
+        info(working ? "アイコンを処理しています…" : notice ?? "隠すアイコンを選択（✓は収納中）")
+        if !trusted { command("アクセシビリティを許可…",#selector(requestPermission)) }
+        info("再起動・画面収録は不要です")
         menu.addItem(.separator())
-        let entries = AppCatalog.discover(added: added)
-        if entries.isEmpty { info("対象を「アプリを追加…」から選んでください", in: menu) }
-        for entry in entries {
-            let target = ApplicationTarget(entry: entry)
-            let checks = Set(verified[entry.verificationID] ?? [])
-            let support = entry.blockReason != nil ? "非対応" : checks == Set(["show", "hide"]) ? "表示・非表示確認済み" : checks.isEmpty ? "未検証" : "一部確認済み"
-            let row = NSMenuItem(title: "\(entry.name) — \(support)", action: nil, keyEquivalent: "")
-            let icon = NSWorkspace.shared.icon(forFile: entry.url.path); icon.size = NSSize(width: 18, height: 18); row.image = icon
-            let sub = NSMenu(); sub.autoenablesItems = false
-            info(target.status, in: sub)
-            info("バージョン \(entry.version)", in: sub)
-            if let reason = entry.blockReason { info(reason, in: sub) }
-            else {
-                info(checks.isEmpty ? "このアプリの動作は未検証です" : "このバージョンで実際に確認した結果です", in: sub)
-                info("対象アプリだけを終了して起動し直します", in: sub)
-                sub.addItem(.separator())
-                command("非表示にする…", action: #selector(hideIcon(_:)), in: sub, object: target)
-                command("表示する…", action: #selector(showIcon(_:)), in: sub, object: target)
-                sub.addItem(.separator())
-                info("別途再起動すると表示が戻る場合があります", in: sub)
+        let items = engine.items()
+        let titles = Dictionary(grouping:items,by: \.title)
+        var occurrences: [String:Int] = [:]
+        for icon in items {
+            occurrences[icon.title,default:0] += 1
+            var title = icon.title
+            if (titles[title]?.count ?? 0) > 1 { title += " [\(occurrences[icon.title]!)]" }
+            if icon.protectedReason != nil { title += "（macOSで保護）" }
+            let row = NSMenuItem(title:title,action:#selector(toggleItem(_:)),keyEquivalent:"")
+            row.identifier = NSUserInterfaceItemIdentifier("status-\(icon.id)")
+            row.target = self; row.representedObject = icon; row.state = engine.selectedIDs.contains(icon.id) ? .on : .off
+            row.isEnabled = trusted && !working && icon.protectedReason == nil
+            row.toolTip = icon.protectedReason ?? (row.state == .on ? "選択解除で元の並びへ戻します" : "このアイコンだけを収納します")
+            if let url = NSRunningApplication(processIdentifier:icon.pid)?.bundleURL {
+                let image = NSWorkspace.shared.icon(forFile:url.path); image.size = NSSize(width:18,height:18); row.image = image
             }
-            row.submenu = sub; row.isEnabled = !busy; menu.addItem(row)
+            menu.addItem(row)
         }
+        if items.isEmpty { info("アイコンを取得できません。一覧を再読み込みしてください。") }
         menu.addItem(.separator())
-        command("アプリを追加…", action: #selector(addApplication), in: menu)
-        command("一覧を再読み込み", action: #selector(reload), in: menu)
-        command("MenuDrawerを終了", action: #selector(quitApp), in: menu)
+        command("全て取り出す",#selector(restoreAll))
+        command("一覧を再読み込み",#selector(reload))
+        command("MenuDrawerを終了",#selector(quitApp))
+        toggle.button?.toolTip = working ? "アイコンを処理しています…" : "収納中：\(engine.count)個"
     }
-    @objc private func reload() { refresh() }
-    @objc private func addApplication() {
-        guard !busy else { return }
+    @objc private func requestPermission() {
         menu.cancelTracking()
-        let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.applicationBundle]; panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        panel.message = "管理するアプリを選択してください。追加だけでは設定は変わりません。"
-        NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let entry = AppCatalog.entry(at: url) else { return }
-        if entry.id.hasPrefix("com.apple.") || entry.id == Bundle.main.bundleIdentifier {
-            let alert = NSAlert(); alert.messageText = "このアプリは対象外です"; alert.informativeText = entry.blockReason ?? ""; alert.runModal(); return
+        if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+    }
+    @objc private func toggleItem(_ sender: NSMenuItem) {
+        guard let icon = sender.representedObject as? MenuIcon, !working else { return }
+        let hidden = !engine.selectedIDs.contains(icon.id)
+        run {
+            try await self.engine.setHidden(icon,hidden)
+            self.notice = "\(icon.title)：\(hidden ? "収納しました" : "元へ戻しました")"
         }
-        UserDefaults.standard.set(Array(Set(added + [url.path])).sorted(), forKey: "managedApplicationPaths")
-        notice = "\(entry.name)を追加しました"; refresh()
     }
-    @objc private func hideIcon(_ sender: NSMenuItem) { change(sender, visible: false) }
-    @objc private func showIcon(_ sender: NSMenuItem) { change(sender, visible: true) }
-    private func change(_ sender: NSMenuItem, visible: Bool) {
-        guard !busy, let target = sender.representedObject as? ApplicationTarget else { return }
-        menu.cancelTracking()
-        let entry = target.entry
-        let alert = NSAlert()
-        alert.messageText = "\(entry.name)のアイコンを\(visible ? "表示" : "非表示")にしますか？"
-        alert.informativeText = "\(entry.name)を終了して起動し直します。作業を保存し、録音や通信などを終えてから実行してください。\n\n変更後に表示状態を確認し、失敗した場合は元の設定へ戻します。"
-        alert.addButton(withTitle: "再起動して適用"); alert.addButton(withTitle: "キャンセル")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        busy = true; notice = "\(entry.name)を切り替えています…"; refresh()
-        item.button?.toolTip = notice
+    @objc private func restoreAll() { run { try await self.engine.restoreAll(keepSelection:false); self.notice = "全て取り出しました" } }
+    @objc private func reload() { run { try await self.engine.reconcile(); self.notice = nil } }
+    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
+        guard !working else { return }
+        menu.cancelTracking(); working = true; refresh()
         Task { @MainActor in
-            do {
-                try await VisibilitySwitch.apply(visible: visible, to: target)
-                var checks = verified
-                checks[entry.verificationID] = Array(Set((checks[entry.verificationID] ?? []) + [visible ? "show" : "hide"]))
-                verified = checks
-                UserDefaults.standard.set(Array(Set(added + [entry.url.path])).sorted(), forKey: "managedApplicationPaths")
-                notice = "\(entry.name)：\(visible ? "表示" : "非表示")を確認しました"
-            } catch {
-                var checks = verified
-                checks[entry.verificationID] = (checks[entry.verificationID] ?? []).filter { $0 != (visible ? "show" : "hide") }
-                verified = checks
-                notice = "\(entry.name)：切り替えに失敗しました"
-                let failure = NSAlert(); failure.messageText = notice!; failure.informativeText = error.localizedDescription; failure.runModal()
+            do { try await operation() }
+            catch {
+                notice = "処理を完了できませんでした"
+                let alert = NSAlert(); alert.messageText = notice!; alert.informativeText = error.localizedDescription + "\n収納境界を展開し、取り出せる状態に戻しています。"
+                alert.runModal()
             }
-            busy = false; item.button?.toolTip = notice; refresh()
+            working = false; refresh()
         }
     }
-    @objc private func quitApp() { if !busy { NSApp.terminate(nil) } }
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { busy ? .terminateCancel : .terminateNow }
+    private func reconcile() async {
+        guard AXIsProcessTrusted(), !working, !terminating else { return }
+        working = true
+        do { try await engine.reconcile() }
+        catch { notice = error.localizedDescription }
+        working = false; refresh()
+    }
+    @objc private func quitApp() { if !working { NSApp.terminate(nil) } }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if working { return .terminateCancel }
+        if engine.count == 0 { return .terminateNow }
+        terminating = true; working = true
+        Task { @MainActor in
+            do { try await engine.restoreAll(keepSelection:true) }
+            catch {
+                try? await engine.revealAllTemporarily()
+                let alert = NSAlert(); alert.messageText = "元の並びへの復元を完了できませんでした"; alert.informativeText = error.localizedDescription + "\n収納は解除して終了します。"; alert.runModal()
+            }
+            NSApp.reply(toApplicationShouldTerminate:true)
+        }
+        return .terminateLater
+    }
 }
 MainActor.assumeIsolated {
-    let application = NSApplication.shared
-    let delegate = AppDelegate()
-    application.delegate = delegate
-    withExtendedLifetime(delegate) { application.run() }
+    let app = NSApplication.shared
+    let delegate = AppDelegate(); app.delegate = delegate
+    withExtendedLifetime(delegate) { app.run() }
 }
