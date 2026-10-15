@@ -1,4 +1,4 @@
-import Foundation
+import Cocoa
 @MainActor final class FakeTarget: VisibilityTarget {
     var isRunning: Bool
     var savedVisibility: Bool?
@@ -37,6 +37,18 @@ import Foundation
         let rollback = FakeTarget(running: true, saved: false); rollback.failVerify = true
         do { try await VisibilitySwitch.apply(visible: true, to: rollback); fatalError("失敗が必要") } catch {}
         check(rollback.savedVisibility == false && rollback.isRunning, "元の非表示設定も復元")
+        check(AppCatalog.visibilityKeys(["NSStatusItem Preferred Position TrayA", "NSStatusItem Visible TrayA", "NSStatusItem Visible TrayB", "other"]) == ["NSStatusItem Visible TrayA", "NSStatusItem Visible TrayB"], "アイコン名を保持して位置と表示の設定を重複排除")
+        let url = URL(fileURLWithPath: "/Applications/Example.app")
+        let single = AppEntry(id: "test.single", name: "単一", url: url, version: "1", keys: ["NSStatusItem Visible Tray"])
+        check(single.preferenceKey == "NSStatusItem Visible Tray", "選択したアプリ自身の設定を対象にする")
+        let missing = AppEntry(id: "test.missing", name: "設定なし", url: url, version: "1", keys: [])
+        check(missing.preferenceKey == nil && missing.blockReason != nil, "キーがないアプリでは書き込みを許可しない")
+        let multiple = AppEntry(id: "test.multiple", name: "複数", url: url, version: "1", keys: ["A", "B"])
+        check(multiple.preferenceKey == nil && multiple.blockReason != nil, "複数のアイコンを推測で変更しない")
+        let system = AppEntry(id: "com.apple.controlcenter", name: "システム", url: url, version: "1", keys: ["NSStatusItem Visible WiFi"])
+        check(system.preferenceKey == nil, "システム項目を書き換えない")
+        let update = AppEntry(id: single.id, name: single.name, url: url, version: "2", keys: single.keys)
+        check(single.verificationID != update.verificationID, "アプリ更新後に以前の検証済み表示を引き継がない")
         print("\(count)検証に成功")
     }
 }
