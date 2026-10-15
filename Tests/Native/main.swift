@@ -30,7 +30,10 @@ import ApplicationServices
         print("AX許可=\(AXIsProcessTrusted())、画面収録=\(CGPreflightScreenCaptureAccess())")
         guard AXIsProcessTrusted() else { throw SwitchFailure(message:"検証プロセスのアクセシビリティ未許可") }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow" else { throw SwitchFailure(message:"Macがロック中") }
-        toggle = NSStatusBar.system.statusItem(withLength:24); toggle.button?.title = "T"
+        // 製品と同じく、保存位置を持つ操作ボタンの後から境界が作られる条件を再現する。
+        UserDefaults.standard.set(400,forKey:"NSStatusItem Preferred Position RecoveryTestToggle")
+        toggle = NSStatusBar.system.statusItem(withLength:24)
+        toggle.autosaveName = "RecoveryTestToggle"; toggle.button?.title = "T"
         try await Task.sleep(nanoseconds:100_000_000)
         let fixtures = engine.items().filter { $0.bundleID.hasPrefix("local.codex.MenuDrawerTest.") }
         try require(fixtures.count == 2,"検証アイコンが2個必要です：\(fixtures.count)")
@@ -42,6 +45,7 @@ import ApplicationServices
         let original = StatusWindows.list().map(\.id)
         func sameOrder() -> Bool { StatusWindows.list().map(\.id).filter { original.contains($0) } == original }
         try await engine.setHidden(a,true)
+        try require(!outside(controlID),"収納と同時に操作ボタンまで画面外へ消えました")
         try await engine.setHidden(a,false)
         try require(sameOrder(),"自身のボタンとアイコンが入れ替わりました")
         print("自身のボタンの左の項目を出し入れしても並びを維持")
@@ -54,6 +58,7 @@ import ApplicationServices
         print("収納・取り出しの順番を変えても、自身のボタンを含め元の並びに復帰")
         let pids = Dictionary(uniqueKeysWithValues:fixtures.map { ($0.id,$0.pid) })
         try await engine.setHidden(a,true); try cursor()
+        try require(!outside(controlID),"操作ボタンが消えました")
         try require(outside(a.id) && !outside(b.id),"一つだけの選択収納に失敗")
         print("1個目だけ収納、未選択アイコンは表示")
         var surfaced = false
@@ -63,6 +68,7 @@ import ApplicationServices
         RunLoop.main.add(monitor,forMode:.common)
         do {
             try await engine.setHidden(b,true); try cursor()
+            try require(!outside(controlID),"追加収納で操作ボタンが消えました")
             try require(outside(a.id) && outside(b.id),"2個の選択収納に失敗")
             try await engine.setHidden(b,false); try cursor()
             try require(outside(a.id) && !outside(b.id),"個別の取り出しに失敗")

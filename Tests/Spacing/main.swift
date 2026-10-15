@@ -17,7 +17,9 @@ import ApplicationServices
     func check() async throws -> String {
         // 許可のない独立アプリから呼び、移動イベントを生成する前の失敗だけを検証する。
         guard !AXIsProcessTrusted() else { throw SwitchFailure(message:"AX許可を継承したため、移動せず中止しました") }
+        UserDefaults.standard.set(400,forKey:"NSStatusItem Preferred Position DrawerToggle")
         let item = NSStatusBar.system.statusItem(withLength:28)
+        item.autosaveName = "DrawerToggle"
         item.button?.image = Brand.menuIcon()
         defer { NSStatusBar.system.removeStatusItem(item) }
         guard let number = item.button?.window?.windowNumber, number > 0 else { throw SwitchFailure(message:"検証項目がありません") }

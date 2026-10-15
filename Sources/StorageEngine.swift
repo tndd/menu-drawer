@@ -12,6 +12,9 @@ struct RestorePosition {
 }
 
 @MainActor final class StorageEngine {
+    static func controlsAreRight(of divider: CGRect, frames: [CGRect]) -> Bool {
+        !frames.isEmpty && frames.allSatisfy { $0.minX >= divider.maxX - 1 }
+    }
     private var boundary: NSStatusItem?
     private var selected: [CGWindowID:MenuIcon] = [:]
     private var positions: [CGWindowID:RestorePosition] = [:]
@@ -72,13 +75,33 @@ struct RestorePosition {
     }
     private func ensureBoundary() async throws -> CGWindowID {
         if boundary == nil {
+            // Iceと同じ保存位置の仕組みで境界に明示的な位置を与える。
+            // 無名の新規項目の既定位置へ任せると、保存位置を持つ操作ボタンの右に現れる。
+            UserDefaults.standard.set(100_000,forKey:"NSStatusItem Preferred Position DrawerDivider")
             boundary = NSStatusBar.system.statusItem(withLength:8)
+            boundary?.autosaveName = "DrawerDivider"
             boundary?.button?.setAccessibilityLabel("収納境界")
             boundary?.button?.isEnabled = false
         }
         let id = try boundaryID()
-        _ = try await StatusWindows.waitForFrame(id)
+        let divider = try await StatusWindows.waitForStableFrame(id)
+        let controls = restorationItems().filter { $0.pid == getpid() }
+        guard Self.controlsAreRight(of:divider,frames:controls.map(\.frame)) else {
+            throw SwitchFailure(message:"収納境界が操作ボタンの右にあるため、アイコンを動かさず中止しました")
+        }
         return id
+    }
+    private func controlsAreVisible(_ ids: [CGWindowID]) -> Bool {
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        return ids.allSatisfy { id in
+            guard let frame = StatusWindows.frame(id) else { return false }
+            return NSScreen.screens.contains { screen in
+                let bounds = CGRect(x:screen.frame.minX,y:height-screen.frame.maxY,width:screen.frame.width,height:screen.frame.height)
+                guard bounds.contains(frame) else { return false }
+                guard let right = screen.auxiliaryTopRightArea else { return true }
+                return frame.minX >= right.minX && frame.maxX <= right.maxX
+            }
+        }
     }
     private func expand() async throws {
         guard let boundary else { return }
@@ -97,12 +120,19 @@ struct RestorePosition {
         // 新規アプリが左端へ追加されても、未選択のものを一緒に収納しない。
         let id = try boundaryID()
         guard let divider = StatusWindows.frame(id) else { throw SwitchFailure(message:"収納境界の位置を確認できません") }
+        let controls = restorationItems().filter { $0.pid == getpid() }
+        guard Self.controlsAreRight(of:divider,frames:controls.map(\.frame)) else {
+            throw SwitchFailure(message:"操作ボタンが収納側にあるため、収納を中止しました")
+        }
         let unselected = items().filter { !selectedIDs.contains($0.id) && abs($0.frame.midY-divider.midY)<2 && $0.frame.maxX <= divider.minX+1 }
         for icon in unselected.reversed() { try await mover.move(icon,beside:id,left:false) }
         let width = min(10_000,max(500,(NSScreen.screens.map(\.frame.width).max() ?? 1470)*2))
         boundary.length = width
         let deadline = Date().addingTimeInterval(1)
         while Date() < deadline {
+            guard controlsAreVisible(controls.map(\.id)) else {
+                throw SwitchFailure(message:"操作ボタンが見えなくなるため、収納を解除しました")
+            }
             if selected.keys.allSatisfy({ key in
                 guard let f = StatusWindows.frame(key) else { return false }
                 return !NSScreen.screens.contains { screen in

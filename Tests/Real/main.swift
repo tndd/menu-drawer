@@ -3,6 +3,7 @@ import ApplicationServices
 
 @MainActor final class RealProbe: NSObject,NSApplicationDelegate {
     let engine = StorageEngine()
+    var control: NSStatusItem?
     var passed = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -13,6 +14,7 @@ import ApplicationServices
             do { try await engine.restoreAll(keepSelection:false) }
             catch { try? await engine.revealAllTemporarily(); passed = false; print("復元失敗：\(error.localizedDescription)") }
             UserDefaults.standard.set(saved,forKey:"selectedStatusIdentities")
+            if let control { NSStatusBar.system.removeStatusItem(control) }
             fflush(stdout); exit(passed ? 0 : 1)
         }
     }
@@ -27,6 +29,9 @@ import ApplicationServices
     func check() async throws {
         guard AXIsProcessTrusted() else { throw SwitchFailure(message:"検証プロセスのAX未許可") }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.loginwindow" else { throw SwitchFailure(message:"Macがロック中") }
+        control = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
+        control?.button?.title = "T"
+        if let number = control?.button?.window?.windowNumber { _ = try await StatusWindows.waitForStableFrame(CGWindowID(number)) }
         let initial = engine.items()
         let bundles = ["com.openai.codex","com.apple.TextInputMenuAgent"]
         let targets = bundles.compactMap { bundle in initial.first { $0.bundleID == bundle } }
