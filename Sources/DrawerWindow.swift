@@ -100,17 +100,19 @@ import Cocoa
     var onQuit: () -> Void = {}
     var onPermission: () -> Void = {}
     var onVisibility: (Bool) -> Void = { _ in }
+    var onSystemItems: (Bool) -> Void = { _ in }
     private let hiddenList = IconList(hidden:true)
     private let availableList = IconList(hidden:false)
     private let status = NSTextField(labelWithString:"")
     private var statusRow: NSStackView!
     private var hideIcon: NSButton!
+    private var showSystem: NSButton!
     private var commands: [NSButton] = []
     private var permission: NSButton!
     init() {
-        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:840,height:390),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:840,height:426),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
         window.title = "MenuDrawer"; window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width:720,height:370)
+        window.minSize = NSSize(width:720,height:406)
         super.init(window:window)
         if !window.setFrameUsingName("DrawerWindow") { window.center() }; window.setFrameAutosaveName("DrawerWindow")
         let root = NSStackView()
@@ -128,6 +130,12 @@ import Cocoa
         statusRow = NSStackView(views:[status,NSView(),permission])
         statusRow.orientation = .horizontal; statusRow.spacing = 8; statusRow.alignment = .centerY
         status.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        showSystem = ActionButton("macOS標準の項目を表示",identifier:"show-system-items") { [weak self] in
+            guard let self else { return }; self.onSystemItems(self.showSystem.state == .on)
+        }
+        showSystem.setButtonType(.switch)
+        showSystem.toolTip = "Wi-Fi・音量・入力メニューなどを収納候補に含めます。収納中の項目はオフでも表示します。"
+        root.addArrangedSubview(showSystem)
         let columns = NSStackView(views:[availableList.view,hiddenList.view])
         columns.orientation = .horizontal; columns.spacing = 24; columns.distribution = .fillEqually; columns.alignment = .top
         root.addArrangedSubview(columns)
@@ -154,10 +162,11 @@ import Cocoa
         availableList.onMove = { [weak self] in self?.onMove($0,$1) }
     }
     required init?(coder: NSCoder) { fatalError("未対応") }
-    func update(items: [MenuIcon],selected: Set<CGWindowID>,working: Bool,notice: String?,hideMenuIcon: Bool,trusted: Bool) {
+    func update(items: [MenuIcon],selected: Set<CGWindowID>,working: Bool,notice: String?,hideMenuIcon: Bool,showSystemItems: Bool,trusted: Bool) {
         let allowed = items.filter { $0.protectedReason == nil }
         hiddenList.update(allowed.filter { selected.contains($0.id) },enabled:trusted && !working)
-        availableList.update(allowed.filter { !selected.contains($0.id) },enabled:trusted && !working)
+        availableList.update(allowed.filter { !selected.contains($0.id) && (showSystemItems || !$0.isSystemItem) },enabled:trusted && !working)
+        showSystem.state = showSystemItems ? .on : .off; showSystem.isEnabled = !working
         hideIcon.state = hideMenuIcon ? .on : .off; hideIcon.isEnabled = !working
         commands.forEach { $0.isEnabled = !working }
         permission.isHidden = trusted; permission.isEnabled = !working

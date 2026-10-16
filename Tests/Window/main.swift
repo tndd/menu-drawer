@@ -15,14 +15,22 @@ import Cocoa
         let panel = DrawerWindow()
         panel.window?.appearance = NSAppearance(named:.aqua)
         let names = ["LinearMouse","英かな","ChatGPT","Dropbox","Raycast"]
-        let icons = names.enumerated().map { MenuIcon(id:CGWindowID($0.offset+1),pid:getpid(),bundleID:"fixture",name:$0.element,detail:"",frame:.zero,stableKey:nil) }
-        panel.update(items:icons,selected:[1,2],working:false,notice:nil,hideMenuIcon:true,trusted:true)
+        let icons = names.enumerated().map { MenuIcon(id:CGWindowID($0.offset+1),pid:getpid(),bundleID:"fixture",name:$0.element,detail:"",frame:.zero,stableKey:nil) } + [
+            MenuIcon(id:6,pid:getpid(),bundleID:"com.apple.TextInputMenuAgent",name:"入力メニュー",detail:"",frame:.zero,stableKey:nil),
+            MenuIcon(id:7,pid:getpid(),bundleID:"com.apple.controlcenter",name:"音量",detail:"Sound",frame:.zero,stableKey:nil),
+            MenuIcon(id:8,pid:getpid(),bundleID:"com.apple.controlcenter",name:"時計",detail:"Clock",frame:CGRect(x:0,y:0,width:150,height:24),stableKey:nil)
+        ]
+        panel.update(items:icons,selected:[1,2],working:false,notice:nil,hideMenuIcon:true,showSystemItems:false,trusted:true)
         panel.present()
         try await Task.sleep(nanoseconds:200_000_000)
         let root = panel.window!.contentView!
         func button(_ id: String) throws -> NSButton {
             guard let b = descendants(root).compactMap({ $0 as? NSButton }).first(where: { $0.accessibilityIdentifier() == id }) else { throw SwitchFailure(message:"ボタンがありません："+id) }
             return b
+        }
+        func table(_ id: String) throws -> NSTableView {
+            guard let table = descendants(root).compactMap({ $0 as? NSTableView }).first(where: { $0.accessibilityIdentifier() == id }) else { throw SwitchFailure(message:"一覧がありません："+id) }
+            return table
         }
         func layout() throws {
             root.layoutSubtreeIfNeeded()
@@ -33,7 +41,7 @@ import Cocoa
             let checkRect = check.superview!.convert(check.alignmentRect(forFrame:check.frame),to:root)
             let restoreRect = restore.superview!.convert(restore.alignmentRect(forFrame:restore.frame),to:root)
             try require(checkRect.minX > root.bounds.midX && checkRect.minX > restoreRect.maxX && abs(checkRect.midY-restoreRect.midY)<2,"非表示チェックが右側の操作列にありません：\(checkRect) / \(restoreRect)")
-            for id in ["reload","restore-all","hide-menubar-icon","quit"] {
+            for id in ["reload","restore-all","hide-menubar-icon","show-system-items","quit"] {
                 let b = try button(id), rect = b.convert(b.bounds,to:root)
                 try require(root.bounds.contains(rect),"操作が画面外にあります："+id)
             }
@@ -49,6 +57,29 @@ import Cocoa
         try layout()
         var move: (CGWindowID,Bool)?
         panel.onMove = { move = ($0.id,$1) }
+        try require((try button("show-system-items")).state == .off && (try table("list-available")).numberOfRows == 3,"初期状態でmacOS標準項目が候補から外れていません")
+        var systemPreference: Bool?
+        panel.onSystemItems = { systemPreference = $0 }
+        try button("show-system-items").performClick(nil)
+        try require(systemPreference == true,"macOS標準項目の表示をオンにできません")
+        panel.update(items:icons,selected:[1,2],working:false,notice:nil,hideMenuIcon:true,showSystemItems:true,trusted:true)
+        try await Task.sleep(nanoseconds:100_000_000)
+        try require((try table("list-available")).numberOfRows == 5,"オンにしても入力メニュー・音量が候補に出ません、または保護項目まで表示されました")
+        panel.window!.display()
+        try await Task.sleep(nanoseconds:200_000_000)
+        if let captured = CGWindowListCreateImage(.null,.optionIncludingWindow,CGWindowID(panel.window!.windowNumber),[.boundsIgnoreFraming,.bestResolution]) {
+            try NSBitmapImageRep(cgImage:captured).representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:"build/tests/window-system-items.png"))
+        }
+        try button("show-system-items").performClick(nil)
+        try require(systemPreference == false,"macOS標準項目の表示をオフにできません")
+        panel.update(items:icons,selected:[1,2,6],working:false,notice:nil,hideMenuIcon:true,showSystemItems:false,trusted:true)
+        try await Task.sleep(nanoseconds:100_000_000)
+        try require((try table("list-available")).numberOfRows == 3 && (try table("list-hidden")).numberOfRows == 3,"オフにすると収納中の標準項目が一覧から消えます")
+        try require((try button("status-6")).toolTip?.contains("取り出す") == true,"オフのまま収納中の標準項目を取り出せません")
+        try button("status-6").performClick(nil)
+        try require(move?.0 == 6 && move?.1 == false,"オフのまま標準項目の取り出し操作を送れません")
+        panel.update(items:icons,selected:[1,2],working:false,notice:nil,hideMenuIcon:true,showSystemItems:false,trusted:true)
+        try await Task.sleep(nanoseconds:100_000_000)
         let take = try button("status-1")
         try require(take.alignmentRect(forFrame:take.frame).width <= 24.1 && take.image != nil && take.title.isEmpty && !take.isBordered,"小さい画像ボタンになっていません")
         take.performClick(nil)
@@ -59,11 +90,11 @@ import Cocoa
         panel.onVisibility = { preference = $0 }
         try button("hide-menubar-icon").performClick(nil)
         try require(preference == false,"非表示チェックを切り替えられません")
-        panel.update(items:icons,selected:[1,2],working:true,notice:nil,hideMenuIcon:true,trusted:true)
+        panel.update(items:icons,selected:[1,2],working:true,notice:nil,hideMenuIcon:true,showSystemItems:false,trusted:true)
         try await Task.sleep(nanoseconds:100_000_000)
-        try require(!(try button("status-1")).isEnabled && !(try button("hide-menubar-icon")).isEnabled,"処理中も操作できます")
-        panel.window!.setContentSize(NSSize(width:720,height:342))
-        panel.update(items:icons,selected:[],working:false,notice:nil,hideMenuIcon:true,trusted:false)
+        try require(!(try button("status-1")).isEnabled && !(try button("hide-menubar-icon")).isEnabled && !(try button("show-system-items")).isEnabled,"処理中も操作できます")
+        panel.window!.setContentSize(NSSize(width:720,height:378))
+        panel.update(items:icons,selected:[],working:false,notice:nil,hideMenuIcon:true,showSystemItems:false,trusted:false)
         try await Task.sleep(nanoseconds:100_000_000)
         try layout()
         try require(!(try button("permission")).isHidden && !(try button("status-1")).isEnabled,"未許可時の案内と操作制限がありません")
@@ -72,7 +103,7 @@ import Cocoa
         panel.present()
         try require(panel.window?.isVisible == true,"閉じた画面を再表示できません")
         panel.window!.close()
-        print("左右同寸法、下部チェック、小さいマークの双方向操作、処理中の操作制限、最小幅・未許可時の表示を確認")
+        print("標準項目の表示切替・収納中の標準項目の取り出し維持、左右同寸法、下部チェック、小さいマークの双方向操作、処理中の操作制限、最小幅・未許可時の表示を確認")
     }
 }
 MainActor.assumeIsolated {

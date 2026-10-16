@@ -26,6 +26,11 @@ import Cocoa
         check(icon("com.apple.controlcenter","時計",150).protectedReason != nil,"macOS固定の時計を識別")
         check(icon("com.apple.controlcenter","AudioVideoModule",34).protectedReason != nil,"録画・録音の保護表示を識別")
         check(icon("com.apple.controlcenter","WiFi",34).protectedReason == nil,"動かせるシステムアイコンまで一律に除外しない")
+        check(icon("com.apple.TextInputMenuAgent","",34).isSystemItem,"入力メニューをmacOS標準項目に分類する")
+        check(icon("com.apple.controlcenter","WiFi",34).isSystemItem,"移動できるWi-Fiも標準項目の表示設定に従う")
+        check(icon("com.apple.menuextra.battery","",34).isSystemItem,"従来のシステム項目識別子にも対応する")
+        check(!icon("com.apple.Safari","",34).isSystemItem,"Apple製の一般アプリを標準メニューと一括扱いしない")
+        check(!icon("third.party.app","WiFi",34).isSystemItem,"名前が同じでも一般アプリの項目を標準メニュー扱いしない")
         print("\(count)検証に成功")
     }
 }
