@@ -19,6 +19,16 @@ struct MenuIcon: Identifiable {
         self.id=id; self.pid=pid; self.bundleID=bundleID; self.name=name; self.detail=detail; self.frame=frame; self.stableKey=stableKey; self.identifier=identifier
     }
     var title: String { detail.isEmpty || detail == name ? name : "\(name) — \(detail)" }
+    var isSystemItem: Bool {
+        let bundle = bundleID.lowercased()
+        switch bundle {
+        case "com.apple.controlcenter", "com.apple.systemuiserver", "com.apple.textinputmenuagent",
+             "com.apple.spotlight", "com.apple.siri", "com.apple.airplayuiagent", "com.apple.universalcontrol":
+            return true
+        default:
+            return bundle.hasPrefix("com.apple.menuextra.") || bundle.hasPrefix("com.apple.inputmethod.")
+        }
+    }
     var protectedReason: String? {
         if bundleID.lowercased() == "com.apple.siri" { return "SiriはmacOSが移動を禁止しています" }
         guard bundleID == "com.apple.controlcenter" else { return nil }

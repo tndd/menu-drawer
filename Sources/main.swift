@@ -13,6 +13,10 @@ import ApplicationServices
         get { UserDefaults.standard.object(forKey:"hideMenuBarIcon") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue,forKey:"hideMenuBarIcon") }
     }
+    private var showSystemItems: Bool {
+        get { UserDefaults.standard.bool(forKey:"showSystemItems") }
+        set { UserDefaults.standard.set(newValue,forKey:"showSystemItems") }
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         panel = DrawerWindow()
@@ -24,6 +28,10 @@ import ApplicationServices
             if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
         }
         panel.onVisibility = { [weak self] in self?.setMenuIconHidden($0) }
+        panel.onSystemItems = { [weak self] show in
+            guard let self, !self.working else { return }
+            self.showSystemItems = show; self.refresh()
+        }
         updateMenuIcon()
         for name in [NSWorkspace.didLaunchApplicationNotification,NSWorkspace.didTerminateApplicationNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName:name,object:nil,queue:.main) { [weak self] _ in
@@ -73,7 +81,7 @@ import ApplicationServices
         }
     }
     private func refresh() {
-        panel.update(items:engine.items(),selected:engine.selectedIDs,working:working,notice:notice,hideMenuIcon:hideMenuIcon,trusted:AXIsProcessTrusted())
+        panel.update(items:engine.items(),selected:engine.selectedIDs,working:working,notice:notice,hideMenuIcon:hideMenuIcon,showSystemItems:showSystemItems,trusted:AXIsProcessTrusted())
         toggle?.button?.toolTip = working ? "アイコンを処理しています…" : "収納中：\(engine.count)個"
     }
     private func move(_ icon: MenuIcon,_ hidden: Bool) {

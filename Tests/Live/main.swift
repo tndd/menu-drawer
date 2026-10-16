@@ -69,6 +69,12 @@ func title(_ e: AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttrib
             if (value == 1) != hidden { try press("hide-menubar-icon"); try await idle() }
             try require((element("hide-menubar-icon").flatMap { attribute($0,kAXValueAttribute) as? Int } == 1) == hidden,"非表示チェックの状態が一致しません")
         }
+        func setSystemPreference(_ show: Bool) async throws {
+            try await idle()
+            guard let box = element("show-system-items"), let value = attribute(box,kAXValueAttribute) as? Int else { throw SwitchFailure(message:"標準項目のチェックがありません") }
+            if (value == 1) != show { try press("show-system-items") }
+            try await wait("標準項目のチェック状態が一致しません") { (element("show-system-items").flatMap { attribute($0,kAXValueAttribute) as? Int } == 1) == show }
+        }
         func choose(_ icon: MenuIcon,_ hidden: Bool) async throws {
             try await idle(); try press("status-\(icon.id)")
             try await wait("マークの操作が実アイコンの移動に反映されません") {
@@ -76,14 +82,25 @@ func title(_ e: AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttrib
             }
             try await idle()
         }
+        let systemPreferenceWasUnset = CFPreferencesCopyAppValue("showSystemItems" as CFString,"local.codex.MenuDrawer" as CFString) == nil
         try await reopen()
         guard let initialValue = element("hide-menubar-icon").flatMap({ attribute($0,kAXValueAttribute) as? Int }) else { throw SwitchFailure(message:"非表示チェックなし") }
+        guard let initialSystemValue = element("show-system-items").flatMap({ attribute($0,kAXValueAttribute) as? Int }) else { throw SwitchFailure(message:"標準項目のチェックなし") }
+        try require(!systemPreferenceWasUnset || initialSystemValue == 0,"未設定なのに標準項目の表示がオンです")
         guard find(app,{ title($0) == "収納中（0）" }) != nil else { throw SwitchFailure(message:"ユーザーの収納状態を変更しないため、収納が空の状態で実行してください") }
         let fixtures = StatusWindows.list().filter { $0.bundleID.hasPrefix("local.codex.MenuDrawerTest.") }
         try require(fixtures.count == 2,"専用の検証アイコンが2個必要です")
         let original = StatusWindows.list().map(\.id)
         func sameOrder() -> Bool { StatusWindows.list().map(\.id).filter { original.contains($0) } == original.filter { StatusWindows.frame($0) != nil } }
         do {
+            let live = StatusWindows.list(excludingPID:drawer.processIdentifier).filter { $0.protectedReason == nil }
+            let systemCount = live.filter(\.isSystemItem).count
+            try require(systemCount > 0,"表示切替を検証するmacOS標準項目がありません")
+            try await setSystemPreference(false)
+            try require(find(app,{ title($0) == "収納できるアイコン（\(live.count-systemCount)）" }) != nil,"オフでも標準項目が収納候補に残っています")
+            try await setSystemPreference(true)
+            try require(find(app,{ title($0) == "収納できるアイコン（\(live.count)）" }) != nil,"オンにしても標準項目が候補に出ません")
+            try require(sameOrder(),"標準項目の表示切替だけでアイコンの並びが変わりました")
             try await setHiddenPreference(true)
             try require(drawer.activationPolicy == .accessory,"Dock非表示の構成ではありません")
             try require(!StatusWindows.list().contains { $0.pid == drawer.processIdentifier },"空の収納に自アプリのメニューバー領域が残っています")
@@ -125,13 +142,15 @@ func title(_ e: AXUIElement) -> String { [kAXTitleAttribute,kAXDescriptionAttrib
             try await reopen()
             try await wait("再起動後に保存した収納が反映されません") { outside(fixtures[0].id) }
             try require(element("hide-menubar-icon").flatMap { attribute($0,kAXValueAttribute) as? Int } == 0,"非表示設定が再起動で変わりました")
+            try require(element("show-system-items").flatMap { attribute($0,kAXValueAttribute) as? Int } == 1,"標準項目の表示設定が再起動で変わりました")
             try await idle(); try press("restore-all"); try await idle()
             try await setHiddenPreference(initialValue == 1)
+            try await setSystemPreference(initialSystemValue == 1)
             try require(fixtures.allSatisfy { !outside($0.id) },"検証アイコンが収納されたままです")
-            print("マークの双方向移動・個別/全体復元・収納中の表示切替・通常終了と再起動時の設定/収納復元：成功")
+            print("標準項目の表示切替・設定保存、マークの双方向移動・個別/全体復元・収納中の表示切替・通常終了と再起動時の設定/収納復元：成功")
             print("専用の検証アイコンのみ操作。ユーザーの他アプリは収納せず、検証前の非表示設定へ復帰")
         } catch {
-            try? await reopen(); try? press("restore-all"); try? await idle(); try? await setHiddenPreference(initialValue == 1)
+            try? await reopen(); try? press("restore-all"); try? await idle(); try? await setHiddenPreference(initialValue == 1); try? await setSystemPreference(initialSystemValue == 1)
             throw error
         }
     }
